@@ -1,30 +1,8 @@
 import { QualtricsConfig } from "../config/settings.js";
 import { RateLimiter } from "./rate-limiter.js";
+import type { Survey, SurveyListResponse, ResponseExportJob } from "../types/index.js";
 
-export interface Survey {
-  id: string;
-  name: string;
-  ownerId: string;
-  lastModified: string;
-  creationDate: string;
-  isActive: boolean;
-}
-
-export interface SurveyListResponse {
-  result: {
-    elements: Survey[];
-    nextPage?: string;
-    totalElements: number;
-  };
-}
-
-export interface ResponseExportJob {
-  result: {
-    progressId: string;
-    percentComplete: number;
-    status: string;
-  };
-}
+export type { Survey, SurveyListResponse, ResponseExportJob };
 
 export class QualtricsClient {
   private baseUrl: string;
@@ -33,15 +11,15 @@ export class QualtricsClient {
   private timeout: number;
 
   constructor(config: QualtricsConfig) {
-    this.baseUrl = config.qualtrics.baseUrl || 
+    this.baseUrl = config.qualtrics.baseUrl ||
       `https://${config.qualtrics.dataCenter}.qualtrics.com/API/v3`;
     this.apiToken = config.qualtrics.apiToken;
     this.rateLimiter = new RateLimiter(config.server.rateLimiting);
     this.timeout = config.server.timeout;
   }
 
-  private async makeRequest<T>(
-    endpoint: string, 
+  public async makeRequest<T>(
+    endpoint: string,
     options: RequestInit = {}
   ): Promise<T> {
     await this.rateLimiter.checkLimit();

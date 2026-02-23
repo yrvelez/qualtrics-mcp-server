@@ -72,3 +72,7 @@ claude_desktop_config.json
 export_*
 survey_responses*
 qualtrics_*_data.*
+
+# Study examples (local only)
+test-*.ts
+study-server/
