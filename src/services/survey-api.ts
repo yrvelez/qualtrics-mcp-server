@@ -59,7 +59,8 @@ export class SurveyApi {
   }
 
   async listBlocks(surveyId: string): Promise<any> {
-    return this.client.makeRequest(`/survey-definitions/${surveyId}/blocks`);
+    const result: any = await this.client.makeRequest(`/survey-definitions/${surveyId}`);
+    return { result: result.result.Blocks };
   }
 
   async getBlock(surveyId: string, blockId: string): Promise<any> {

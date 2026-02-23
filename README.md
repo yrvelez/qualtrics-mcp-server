@@ -161,6 +161,21 @@ Once configured, ask Claude things like:
 - "Add a web service call to my API that sets the stimulus condition"
 - "What piped text syntax do I use to reference embedded data?"
 
+## Examples
+
+See [`examples/motivated-reasoning-study.ts`](examples/motivated-reasoning-study.ts) for a complete script that builds a multi-block experimental survey with:
+
+- 10 survey blocks (consent, issue identification, pre/post measures, randomized treatment arms, demographics, debriefing)
+- JS-powered questions that call OpenAI GPT-4o from within Qualtrics to generate tailored belief items and counterarguments
+- BlockRandomizer flow with treatment vs. placebo conditions
+- Embedded data piping for dynamic question text
+
+Run it with:
+
+```bash
+set -a && source .env && set +a && npx tsx examples/motivated-reasoning-study.ts
+```
+
 ## Architecture
 
 ```

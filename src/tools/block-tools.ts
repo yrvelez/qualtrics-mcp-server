@@ -72,14 +72,21 @@ export function registerBlockTools(
   // Update block
   server.tool(
     "update_block",
-    "Update a block's description or settings",
+    "Update a block's description or settings. The Qualtrics API requires a block Type in the body — if omitted, the current type is auto-fetched.",
     {
       surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
       blockId: z.string().min(1).describe("The block ID to update"),
       description: z.string().optional().describe("New block description"),
+      type: z.string().optional().describe("Block type (e.g., Standard, Default, Trash). If omitted, the current type is auto-fetched."),
     },
     withErrorHandling("update_block", async (args) => {
-      const data: Record<string, any> = {};
+      let blockType = args.type;
+      if (!blockType) {
+        const current = await surveyApi.getBlock(args.surveyId, args.blockId);
+        blockType = current.result.Type;
+      }
+
+      const data: Record<string, any> = { Type: blockType };
       if (args.description !== undefined) data.Description = args.description;
 
       const result = await surveyApi.updateBlock(args.surveyId, args.blockId, data);
