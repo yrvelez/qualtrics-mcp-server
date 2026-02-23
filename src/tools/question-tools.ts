@@ -5,6 +5,12 @@ import { SurveyApi } from "../services/survey-api.js";
 import { QualtricsConfig } from "../config/settings.js";
 import { toolError, toolSuccess, withErrorHandling } from "./_helpers.js";
 
+let questionCounter = 0;
+function nextExportTag(): string {
+  questionCounter++;
+  return `Q_auto_${questionCounter}`;
+}
+
 export function registerQuestionTools(
   server: McpServer,
   client: QualtricsClient,
@@ -79,6 +85,7 @@ export function registerQuestionTools(
         QuestionText: args.questionText,
         QuestionType: args.questionType,
         Selector: args.selector,
+        DataExportTag: nextExportTag(),
       };
       if (args.subSelector) questionData.SubSelector = args.subSelector;
       if (args.choices) questionData.Choices = args.choices;
@@ -169,6 +176,7 @@ export function registerQuestionTools(
         QuestionType: "MC",
         Selector: args.allowMultiple ? "MAVR" : "SAVR",
         SubSelector: "TX",
+        DataExportTag: nextExportTag(),
         Choices: choicesObj,
         ChoiceOrder: args.choices.map((_: string, i: number) => String(i + 1)),
       };
@@ -217,6 +225,7 @@ export function registerQuestionTools(
         QuestionText: args.questionText,
         QuestionType: "TE",
         Selector: selectorMap[args.textType],
+        DataExportTag: nextExportTag(),
       };
 
       if (args.forceResponse) {
@@ -269,6 +278,7 @@ export function registerQuestionTools(
         QuestionType: "Matrix",
         Selector: "Likert",
         SubSelector: "SingleAnswer",
+        DataExportTag: nextExportTag(),
         Choices: choices,
         ChoiceOrder: args.statements.map((_: string, i: number) => String(i + 1)),
         Answers: answers,
