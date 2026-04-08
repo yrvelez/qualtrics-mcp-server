@@ -163,7 +163,8 @@ export function registerQuestionTools(
       },
     },
     withErrorHandling("update_question", async (args) => {
-      // Qualtrics PUT requires QuestionType — auto-fetch current question
+      // Qualtrics PUT replaces the entire question — omitted fields get wiped.
+      // Always carry forward existing values so partial updates are safe.
       const current = await surveyApi.getQuestion(args.surveyId, args.questionId);
       const currentQ = current.result;
       const data: Record<string, any> = {
@@ -171,6 +172,14 @@ export function registerQuestionTools(
         Selector: currentQ.Selector,
       };
       if (currentQ.SubSelector) data.SubSelector = currentQ.SubSelector;
+
+      // Carry forward existing values, then override with user-provided values
+      if (currentQ.QuestionText !== undefined) data.QuestionText = currentQ.QuestionText;
+      if (currentQ.Choices !== undefined) data.Choices = currentQ.Choices;
+      if (currentQ.Validation !== undefined) data.Validation = currentQ.Validation;
+      if (currentQ.QuestionJS !== undefined) data.QuestionJS = currentQ.QuestionJS;
+
+      // User-provided values override existing ones
       if (args.questionText !== undefined) data.QuestionText = args.questionText;
       if (args.choices !== undefined) data.Choices = args.choices;
       if (args.validation !== undefined) data.Validation = args.validation;
