@@ -11,7 +11,6 @@ export interface SurveyListResponse {
   result: {
     elements: Survey[];
     nextPage?: string;
-    totalElements: number;
   };
 }
 

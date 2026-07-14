@@ -10,6 +10,11 @@ import { registerContactTools } from "./contact-tools.js";
 import { registerUserTools } from "./user-tools.js";
 import { registerWebhookTools } from "./webhook-tools.js";
 import { registerFlowTools } from "./flow-tools.js";
+import { registerApiTools } from "./api-tools.js";
+import { registerQuotaTools } from "./quota-tools.js";
+import { registerSurveyImportTools } from "./survey-import-tools.js";
+import { registerLibraryTools } from "./library-tools.js";
+import { registerSurveyDesignTools } from "./survey-design-tools.js";
 
 export async function registerTools(
   server: McpServer,
@@ -25,4 +30,9 @@ export async function registerTools(
   registerUserTools(server, client, config);
   registerWebhookTools(server, client, config);
   registerFlowTools(server, client, config);
+  registerApiTools(server, client);
+  registerQuotaTools(server, client, config);
+  registerSurveyImportTools(server, client);
+  registerLibraryTools(server, client);
+  registerSurveyDesignTools(server, client, config);
 }

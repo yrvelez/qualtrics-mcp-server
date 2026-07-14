@@ -3,7 +3,111 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { QualtricsClient } from "../services/qualtrics-client.js";
 import { FlowApi } from "../services/flow-api.js";
 import { QualtricsConfig } from "../config/settings.js";
-import { toolError, toolSuccess, withErrorHandling } from "./_helpers.js";
+import { toolError, toolSuccess, withErrorHandling, requireDeleteConfirmation } from "./_helpers.js";
+import {
+  allocateFlowId,
+  allFlowIds,
+  findFlowLocation,
+  flowNodes,
+  insertFlowElements,
+  maxFlowNumber,
+  normalizeFlowCount,
+  removeFlowElement,
+  walkFlow,
+  type FlowPlacement,
+} from "../utils/flow-tree.js";
+
+const FLOW_PLACEMENT = z.enum([
+  "beginning",
+  "end",
+  "before",
+  "after",
+  "inside_beginning",
+  "inside_end",
+]);
+
+function flowTreeErrors(flow: Record<string, any>): string[] {
+  const errors: string[] = [];
+  if (!Array.isArray(flow.Flow)) {
+    errors.push("The root Flow property must be an array.");
+    return errors;
+  }
+
+  const seen = new Set<string>();
+  for (const [index, element] of flowNodes(flow).entries()) {
+    const label = index === 0
+      ? "root flow"
+      : `${element.Type ?? "unknown-type"} element #${index}`;
+    if (typeof element.Type !== "string" || element.Type.length === 0) {
+      errors.push(`${label} has no Type.`);
+    }
+    if (typeof element.FlowID !== "string" || element.FlowID.length === 0) {
+      errors.push(`${label} has no FlowID.`);
+    } else if (!/^FL_\d+$/.test(element.FlowID)) {
+      errors.push(`${label} has malformed FlowID '${element.FlowID}'.`);
+    } else if (seen.has(element.FlowID)) {
+      errors.push(`Duplicate FlowID '${element.FlowID}'.`);
+    } else {
+      seen.add(element.FlowID);
+    }
+    if (element.Flow !== undefined && !Array.isArray(element.Flow)) {
+      errors.push(`${label} has a non-array Flow property.`);
+    }
+  }
+  return errors;
+}
+
+function assignInsertedFlowIds(
+  flow: Record<string, any>,
+  element: Record<string, any>
+): string | null {
+  const used = new Set(allFlowIds(flow));
+  let nextNumber = Math.max(
+    Number(flow.Properties?.Count) || 0,
+    maxFlowNumber(flow)
+  );
+  let error: string | null = null;
+
+  function prepare(node: unknown, label: string): void {
+    if (error) return;
+    if (!node || typeof node !== "object" || Array.isArray(node)) {
+      error = `${label} must be a flow-element object.`;
+      return;
+    }
+    const definition = node as Record<string, any>;
+    if (definition.FlowID === undefined) {
+      do {
+        nextNumber += 1;
+        definition.FlowID = `FL_${nextNumber}`;
+      } while (used.has(definition.FlowID));
+    }
+    if (typeof definition.FlowID !== "string" || !/^FL_\d+$/.test(definition.FlowID)) {
+      error = `${label} FlowID must use the format FL_<number>.`;
+      return;
+    }
+    if (used.has(definition.FlowID)) {
+      error = `FlowID '${definition.FlowID}' already exists or is repeated in the inserted subtree.`;
+      return;
+    }
+    used.add(definition.FlowID);
+    if (typeof definition.Type !== "string" || definition.Type.length === 0) {
+      error = `${label} must have a non-empty Type.`;
+      return;
+    }
+    if (definition.Flow !== undefined) {
+      if (!Array.isArray(definition.Flow)) {
+        error = `${label} has a non-array Flow property.`;
+        return;
+      }
+      definition.Flow.forEach((child: unknown, index: number) =>
+        prepare(child, `${label}.Flow[${index}]`)
+      );
+    }
+  }
+
+  prepare(element, "element");
+  return error;
+}
 
 export function registerFlowTools(
   server: McpServer,
@@ -43,6 +147,11 @@ export function registerFlowTools(
       },
     },
     withErrorHandling("update_survey_flow", async (args) => {
+      const errors = flowTreeErrors(args.flow);
+      if (errors.length > 0) {
+        return toolError(`Invalid survey flow:\n${errors.join("\n")}`);
+      }
+      normalizeFlowCount(args.flow);
       const result = await flowApi.updateFlow(args.surveyId, args.flow);
       return toolSuccess({
         success: true,
@@ -53,11 +162,275 @@ export function registerFlowTools(
     })
   );
 
+  // Insert a raw flow element without replacing the complete flow
+  server.registerTool(
+    "insert_flow_element",
+    {
+      description:
+        "Insert any Qualtrics flow element (Block, Branch, Group, BlockRandomizer, EmbeddedData, WebService, EndSurvey, Authenticator, etc.) at an exact position. Allocates a collision-free FlowID when one is not supplied.",
+      annotations: { destructiveHint: false },
+      inputSchema: {
+        surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
+        element: z.record(z.any()).describe("Complete Qualtrics flow element definition; FlowID is optional"),
+        placement: FLOW_PLACEMENT.optional().describe("Insertion position (default: end)"),
+        referenceFlowId: z.string().optional().describe("Required for before, after, inside_beginning, and inside_end"),
+      },
+    },
+    withErrorHandling("insert_flow_element", async (args) => {
+      const current = await flowApi.getFlow(args.surveyId);
+      const flow = current.result;
+      const element = { ...args.element };
+      const idError = assignInsertedFlowIds(flow, element);
+      if (idError) return toolError(idError);
+
+      insertFlowElements(
+        flow,
+        [element],
+        (args.placement ?? "end") as FlowPlacement,
+        args.referenceFlowId
+      );
+      normalizeFlowCount(flow);
+      const result = await flowApi.updateFlow(args.surveyId, flow);
+
+      return toolSuccess({
+        success: true,
+        surveyId: args.surveyId,
+        flowId: element.FlowID,
+        type: element.Type,
+        placement: args.placement ?? "end",
+        referenceFlowId: args.referenceFlowId,
+        message: "Flow element inserted successfully",
+        details: result.result,
+      });
+    })
+  );
+
+  // Safely patch a single flow element within the complete flow tree.
+  server.registerTool(
+    "update_flow_element",
+    {
+      description:
+        "Update one flow element by FlowID. By default this fetches and carries forward the existing definition so omitted fields are preserved, then writes the normalized complete flow tree.",
+      annotations: { destructiveHint: false, idempotentHint: true },
+      inputSchema: {
+        surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
+        flowId: z.string().min(1).describe("FlowID to update (for example, FL_12)"),
+        element: z.record(z.any()).describe("Fields to update, or the complete replacement definition"),
+        replace: z.boolean().optional().describe("Replace instead of merging with the current element (default: false)"),
+      },
+    },
+    withErrorHandling("update_flow_element", async (args) => {
+      const current = await flowApi.getFlow(args.surveyId);
+      const location = findFlowLocation(current.result.Flow ?? [], args.flowId);
+      if (!location) return toolError(`Flow element '${args.flowId}' was not found.`);
+
+      const definition = args.replace
+        ? { ...args.element, FlowID: args.flowId }
+        : { ...location.element, ...args.element, FlowID: args.flowId };
+      location.elements[location.index] = definition;
+      const errors = flowTreeErrors(current.result);
+      if (errors.length > 0) {
+        return toolError(`Invalid updated survey flow:\n${errors.join("\n")}`);
+      }
+      normalizeFlowCount(current.result);
+      const result = await flowApi.updateFlow(args.surveyId, current.result);
+
+      return toolSuccess({
+        success: true,
+        surveyId: args.surveyId,
+        flowId: args.flowId,
+        message: "Flow element updated successfully",
+        details: result.result,
+      });
+    })
+  );
+
+  // Move an existing flow element
+  server.registerTool(
+    "move_flow_element",
+    {
+      description:
+        "Move an existing flow element anywhere in the top-level or nested flow while preserving its definition and FlowID.",
+      annotations: { destructiveHint: false, idempotentHint: true },
+      inputSchema: {
+        surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
+        flowId: z.string().min(1).describe("FlowID to move"),
+        placement: FLOW_PLACEMENT.describe("Destination position"),
+        referenceFlowId: z.string().optional().describe("Required except for beginning/end"),
+      },
+    },
+    withErrorHandling("move_flow_element", async (args) => {
+      if (args.referenceFlowId === args.flowId) {
+        return toolError("A flow element cannot be positioned relative to itself.");
+      }
+
+      const current = await flowApi.getFlow(args.surveyId);
+      const flow = current.result;
+      const location = findFlowLocation(flow.Flow ?? [], args.flowId);
+      if (!location) return toolError(`Flow element '${args.flowId}' was not found.`);
+
+      if (args.referenceFlowId && Array.isArray(location.element.Flow)) {
+        const descendants: string[] = [];
+        walkFlow(location.element.Flow, (element) => {
+          if (typeof element.FlowID === "string") descendants.push(element.FlowID);
+        });
+        if (descendants.includes(args.referenceFlowId)) {
+          return toolError("A flow element cannot be moved relative to one of its own descendants.");
+        }
+      }
+
+      const element = removeFlowElement(flow, args.flowId)!;
+      insertFlowElements(
+        flow,
+        [element],
+        args.placement as FlowPlacement,
+        args.referenceFlowId
+      );
+      normalizeFlowCount(flow);
+      const result = await flowApi.updateFlow(args.surveyId, flow);
+
+      return toolSuccess({
+        success: true,
+        surveyId: args.surveyId,
+        flowId: args.flowId,
+        placement: args.placement,
+        referenceFlowId: args.referenceFlowId,
+        message: "Flow element moved successfully",
+        details: result.result,
+      });
+    })
+  );
+
+  // Delete one flow element
+  server.registerTool(
+    "delete_flow_element",
+    {
+      description: "Delete one top-level or nested flow element without rebuilding the rest of the flow",
+      annotations: { destructiveHint: true },
+      inputSchema: {
+        surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
+        flowId: z.string().min(1).describe("FlowID to delete"),
+        confirmDelete: z.boolean().describe("Must be true to confirm deletion"),
+      },
+    },
+    withErrorHandling("delete_flow_element", async (args) => {
+      const guard = requireDeleteConfirmation(args);
+      if (guard) return guard;
+
+      const current = await flowApi.getFlow(args.surveyId);
+      const flow = current.result;
+      const removed = removeFlowElement(flow, args.flowId);
+      if (!removed) return toolError(`Flow element '${args.flowId}' was not found.`);
+
+      normalizeFlowCount(flow);
+      const result = await flowApi.updateFlow(args.surveyId, flow);
+      return toolSuccess({
+        success: true,
+        surveyId: args.surveyId,
+        flowId: args.flowId,
+        removedType: removed.Type,
+        message: "Flow element deleted successfully",
+        details: result.result,
+      });
+    })
+  );
+
+  // Validate cross-references and identifiers before publishing
+  server.registerTool(
+    "validate_survey_design",
+    {
+      description:
+        "Read-only preflight for a programmed survey. Checks FlowID uniqueness/counts, flow block references, block question references, DataExportTag presence/uniqueness, and unreachable blocks before activation or publishing.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
+      },
+    },
+    withErrorHandling("validate_survey_design", async (args) => {
+      const [definitionResult, flowResult] = await Promise.all([
+        client.getSurveyDefinition(args.surveyId),
+        flowApi.getFlow(args.surveyId),
+      ]);
+      const definition = definitionResult.result;
+      const flow = flowResult.result;
+      const questions: Record<string, any> = definition.Questions ?? definition.questions ?? {};
+      const blocks: Record<string, any> = definition.Blocks ?? definition.blocks ?? {};
+      const errors: string[] = [];
+      const warnings: string[] = [];
+
+      errors.push(...flowTreeErrors(flow));
+      const flowIds = allFlowIds(flow);
+      const actualMax = maxFlowNumber(flow);
+      if (Number(flow.Properties?.Count) !== actualMax) {
+        errors.push(`Flow Properties.Count is ${String(flow.Properties?.Count)}, but the highest FlowID is ${actualMax}.`);
+      }
+
+      const blockIds = new Set(Object.keys(blocks));
+      const questionIds = new Set(Object.keys(questions));
+      const referencedBlocks = new Set<string>();
+      walkFlow(Array.isArray(flow.Flow) ? flow.Flow : [], (element) => {
+        if (element.Type === "Block" && typeof element.ID === "string") {
+          referencedBlocks.add(element.ID);
+          if (!blockIds.has(element.ID)) errors.push(`Flow ${element.FlowID} references missing block ${element.ID}.`);
+        }
+      });
+
+      function inspectBlockValue(value: unknown, blockId: string): void {
+        if (Array.isArray(value)) {
+          for (const item of value) inspectBlockValue(item, blockId);
+        } else if (value && typeof value === "object") {
+          const element = value as Record<string, any>;
+          if (element.Type === "Question" && typeof element.QuestionID === "string" && !questionIds.has(element.QuestionID)) {
+            errors.push(`Block ${blockId} references missing question ${element.QuestionID}.`);
+          }
+          for (const nested of Object.values(element)) inspectBlockValue(nested, blockId);
+        }
+      }
+      for (const [blockId, block] of Object.entries(blocks)) {
+        inspectBlockValue(block.BlockElements ?? [], blockId);
+        if (block.Type !== "Trash" && !referencedBlocks.has(blockId)) {
+          warnings.push(`Block ${blockId} (${block.Description ?? "unnamed"}) is not reachable from the survey flow.`);
+        }
+      }
+
+      const tags = new Map<string, string[]>();
+      for (const [mapId, question] of Object.entries(questions)) {
+        const questionId = question.QuestionID ?? mapId;
+        const tag = question.DataExportTag;
+        if (question.QuestionType !== "DB" && (!tag || typeof tag !== "string")) {
+          warnings.push(`Question ${questionId} has no DataExportTag.`);
+        }
+        if (typeof tag === "string" && tag.length > 0) {
+          const ids = tags.get(tag) ?? [];
+          ids.push(questionId);
+          tags.set(tag, ids);
+        }
+      }
+      for (const [tag, ids] of tags) {
+        if (ids.length > 1) errors.push(`DataExportTag '${tag}' is used by multiple questions: ${ids.join(", ")}.`);
+      }
+
+      return toolSuccess({
+        surveyId: args.surveyId,
+        valid: errors.length === 0,
+        errors,
+        warnings,
+        summary: {
+          questions: questionIds.size,
+          blocks: blockIds.size,
+          flowElements: flowIds.length,
+          highestFlowId: actualMax,
+          uniqueDataExportTags: tags.size,
+        },
+      });
+    })
+  );
+
   // Add embedded data fields
   server.registerTool(
     "add_embedded_data",
     {
-      description: "Add embedded data fields to the survey flow. These fields can be set via URL parameters, contact lists, or web services, and referenced in questions with piped text ${e://Field/FieldName}. The embedded data element is inserted at the beginning of the flow (before all blocks) so fields are available throughout.",
+      description: "Add embedded data fields anywhere in the survey flow. Place declarations at the beginning, or place assignments after the question/web service that produces their values. Fields are referenced with ${e://Field/FieldName}.",
       annotations: { destructiveHint: false },
       inputSchema: {
         surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
@@ -65,7 +438,11 @@ export function registerFlowTools(
           name: z.string().describe("Field name (used in piped text as ${e://Field/name})"),
           value: z.string().optional().describe("Default value (can include piped text). Leave empty to set via URL param or contact list."),
           type: z.enum(["Custom", "Recipient"]).optional().describe("'Custom' for flow-set fields, 'Recipient' for contact list fields (default: Custom)"),
+          variableType: z.enum(["String", "Number", "DateTime", "Boolean"]).optional().describe("Embedded-data variable type (default: String)"),
+          analyzeText: z.boolean().optional().describe("Enable text analysis for this field (default: false)"),
         })).min(1).describe("Array of embedded data fields to add"),
+        placement: FLOW_PLACEMENT.optional().describe("Insertion position (default: beginning)"),
+        referenceFlowId: z.string().optional().describe("Required for before, after, inside_beginning, and inside_end"),
       },
     },
     withErrorHandling("add_embedded_data", async (args) => {
@@ -73,27 +450,28 @@ export function registerFlowTools(
       const currentFlow = await flowApi.getFlow(args.surveyId);
       const flow = currentFlow.result;
 
-      // Determine next FlowID
-      const nextFlowNum = (flow.Properties?.Count || flow.Flow.length) + 1;
-
       // Build embedded data element
       const edElement: Record<string, any> = {
-        FlowID: `FL_${nextFlowNum}`,
+        FlowID: allocateFlowId(flow),
         Type: "EmbeddedData",
         EmbeddedData: args.fields.map((f: any) => ({
           Description: f.name,
           Type: f.type || "Custom",
           Field: f.name,
-          VariableType: "String",
+          VariableType: f.variableType || "String",
           DataVisibility: [],
-          AnalyzeText: false,
+          AnalyzeText: f.analyzeText ?? false,
           Value: f.value || "",
         })),
       };
 
-      // Insert at the beginning of the flow (before blocks)
-      flow.Flow.unshift(edElement);
-      flow.Properties.Count = nextFlowNum;
+      insertFlowElements(
+        flow,
+        [edElement],
+        (args.placement ?? "beginning") as FlowPlacement,
+        args.referenceFlowId
+      );
+      normalizeFlowCount(flow);
 
       // PUT updated flow
       const result = await flowApi.updateFlow(args.surveyId, flow);
@@ -107,6 +485,8 @@ export function registerFlowTools(
           pipedText: `\${e://Field/${f.name}}`,
           defaultValue: f.value || "(set via URL param or contact list)",
         })),
+        placement: args.placement ?? "beginning",
+        referenceFlowId: args.referenceFlowId,
         message: `${args.fields.length} embedded data field(s) added to survey flow`,
         tip: "Pass values via survey URL: ?FieldName=value or set them in a contact list / mailing list",
       });
@@ -117,7 +497,7 @@ export function registerFlowTools(
   server.registerTool(
     "add_web_service",
     {
-      description: "Add a Web Service element to the survey flow that makes an HTTP call to an external API during survey execution. Response values can be mapped to embedded data fields for use in subsequent questions via piped text. The web service is inserted at the position you specify (default: before the first block).",
+      description: "Add a Web Service element anywhere in the survey flow. Response values can be mapped to embedded data fields for downstream piped text. For authentication, headers, or advanced Qualtrics fields, use additionalFields.",
       annotations: { destructiveHint: false },
       inputSchema: {
         surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
@@ -131,7 +511,10 @@ export function registerFlowTools(
           jsonPath: z.string().describe("Dot-notation path in the JSON response (e.g., 'data.score', 'result.name')"),
           fieldName: z.string().describe("Embedded data field name to store the value in"),
         })).min(1).describe("Map response JSON paths to embedded data fields"),
-        position: z.enum(["beginning", "end"]).optional().describe("Where to insert in the flow (default: beginning)"),
+        placement: FLOW_PLACEMENT.optional().describe("Insertion position (default: beginning)"),
+        referenceFlowId: z.string().optional().describe("Required for before, after, inside_beginning, and inside_end"),
+        declareResponseFields: z.boolean().optional().describe("Also insert an EmbeddedData declaration for mapped fields (default: true)"),
+        additionalFields: z.record(z.any()).optional().describe("Other WebService definition fields, such as headers or authentication; merged last"),
       },
     },
     withErrorHandling("add_web_service", async (args) => {
@@ -139,7 +522,8 @@ export function registerFlowTools(
       const currentFlow = await flowApi.getFlow(args.surveyId);
       const flow = currentFlow.result;
 
-      const currentCount = flow.Properties?.Count || flow.Flow.length;
+      const firstFlowId = allocateFlowId(flow);
+      const firstFlowNumber = Number(firstFlowId.slice(3));
 
       // Build the embedded data declarations for response-mapped fields
       const edFields = args.responseMapping.map((m: any) => ({
@@ -154,7 +538,7 @@ export function registerFlowTools(
 
       // Build web service element (Qualtrics uses arrays with lowercase key/value)
       const wsElement: Record<string, any> = {
-        FlowID: `FL_${currentCount + 1}`,
+        FlowID: `FL_${firstFlowNumber + 1}`,
         Type: "WebService",
         URL: args.url,
         Method: args.method || "GET",
@@ -167,21 +551,25 @@ export function registerFlowTools(
           value: m.fieldName,
         })),
       };
+      if (args.additionalFields) Object.assign(wsElement, args.additionalFields);
+      wsElement.FlowID = `FL_${firstFlowNumber + 1}`;
+      wsElement.Type = "WebService";
 
       // Also add an embedded data element to declare the target fields
       const edElement: Record<string, any> = {
-        FlowID: `FL_${currentCount + 2}`,
+        FlowID: firstFlowId,
         Type: "EmbeddedData",
         EmbeddedData: edFields,
       };
 
-      if (args.position === "end") {
-        flow.Flow.push(edElement, wsElement);
-      } else {
-        // Insert at beginning: ED first, then WS, then existing flow
-        flow.Flow.unshift(edElement, wsElement);
-      }
-      flow.Properties.Count = currentCount + 2;
+      const elements = args.declareResponseFields === false ? [wsElement] : [edElement, wsElement];
+      insertFlowElements(
+        flow,
+        elements,
+        (args.placement ?? "beginning") as FlowPlacement,
+        args.referenceFlowId
+      );
+      normalizeFlowCount(flow);
 
       // PUT updated flow
       const result = await flowApi.updateFlow(args.surveyId, flow);
@@ -190,7 +578,7 @@ export function registerFlowTools(
         success: true,
         surveyId: args.surveyId,
         webServiceFlowId: wsElement.FlowID,
-        embeddedDataFlowId: edElement.FlowID,
+        embeddedDataFlowId: args.declareResponseFields === false ? null : edElement.FlowID,
         url: args.url,
         method: args.method || "GET",
         mappedFields: args.responseMapping.map((m: any) => ({
@@ -198,6 +586,8 @@ export function registerFlowTools(
           to: m.fieldName,
           pipedText: `\${e://Field/${m.fieldName}}`,
         })),
+        placement: args.placement ?? "beginning",
+        referenceFlowId: args.referenceFlowId,
         message: "Web service element added to survey flow",
         tip: "Use the mapped fields in question text with piped text, e.g., ${e://Field/FieldName}",
       });
@@ -404,8 +794,8 @@ export function registerFlowTools(
               url: el.URL,
               method: el.Method,
               responseMapping: el.ResponseMap?.map((m: any) => ({
-                from: m.Key,
-                to: m.Value,
+                from: m.Key ?? m.key,
+                to: m.Value ?? m.value,
               })) || [],
             });
           }

@@ -5,16 +5,50 @@ import { SurveyApi } from "../services/survey-api.js";
 import { QualtricsConfig } from "../config/settings.js";
 import { toolError, toolSuccess, withErrorHandling, requireDeleteConfirmation } from "./_helpers.js";
 
-let questionCounter = 0;
-function nextExportTag(): string {
-  questionCounter++;
-  return `Q_auto_${questionCounter}`;
+const reservedExportTags = new Map<string, Set<string>>();
+
+async function nextExportTag(
+  surveyApi: SurveyApi,
+  surveyId: string,
+  questionText?: string
+): Promise<string> {
+  const stem = (questionText ?? "Question")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\$\{[^}]+\}/g, " embedded data ")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 40)
+    .replace(/_+$/g, "");
+  const base = /^[A-Za-z]/.test(stem)
+    ? stem
+    : `Question_${stem || "Response"}`;
+
+  const result = await surveyApi.listQuestions(surveyId);
+  const rawQuestions = result?.result?.elements ?? result?.result ?? [];
+  const questions = Array.isArray(rawQuestions)
+    ? rawQuestions
+    : Object.values(rawQuestions);
+  const used = new Set<string>();
+  for (const question of questions as Array<Record<string, any>>) {
+    if (typeof question?.DataExportTag === "string") {
+      used.add(question.DataExportTag);
+    }
+  }
+  const reserved = reservedExportTags.get(surveyId) ?? new Set<string>();
+  reservedExportTags.set(surveyId, reserved);
+  for (const tag of reserved) used.add(tag);
+
+  let candidate = base;
+  let suffix = 2;
+  while (used.has(candidate)) candidate = `${base}_${suffix++}`;
+  reserved.add(candidate);
+  return candidate;
 }
 
 const QUESTION_JS_DESC =
   "JavaScript to attach to this question (QuestionJS). IMPORTANT: Avoid literal `${` in JS strings — Qualtrics interprets it as piped text and corrupts the code. Use `\\x24{` or `String.fromCharCode(36)+'{'` instead.";
 
-const PIPED_TEXT_PREFIXES = /\$\{(q|e|m|date|rand|lm|gr):\/\//i;
+const PIPED_TEXT_PREFIXES = /^\$\{(?:q|e|m|date|rand|lm|gr):\/\//i;
 
 function checkQuestionJSWarning(js: string): string | null {
   // Find ${ sequences that are NOT valid Qualtrics piped text
@@ -33,6 +67,64 @@ function checkQuestionJSWarning(js: string): string | null {
   }
   return null;
 }
+
+// QuestionDescription is required by the API schema (max 100 chars, plain text).
+function toQuestionDescription(text: string): string {
+  const plain = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return plain.substring(0, 100) || "Question";
+}
+
+function buildDisplayMap(labels: string[]): Record<string, { Display: string }> {
+  const map: Record<string, { Display: string }> = {};
+  labels.forEach((label, index) => {
+    map[String(index + 1)] = { Display: label };
+  });
+  return map;
+}
+
+function orderKeys(count: number): string[] {
+  return Array.from({ length: count }, (_, i) => String(i + 1));
+}
+
+function validationSettings(forceResponse: boolean | undefined): Record<string, any> {
+  return {
+    Settings: {
+      ForceResponse: forceResponse ? "ON" : "OFF",
+      ForceResponseType: "ON",
+      Type: "None",
+    },
+  };
+}
+
+async function attachQuestionJs(
+  surveyApi: SurveyApi,
+  surveyId: string,
+  questionId: string,
+  questionJs: string
+): Promise<void> {
+  // QuestionJS is reliably supported on the full question PUT, but is not in
+  // the public create-question schema. Carry the newly created definition
+  // forward so attaching JavaScript cannot erase other question fields.
+  const current = await surveyApi.getQuestion(surveyId, questionId);
+  const definition: Record<string, any> = {
+    ...current.result,
+    QuestionJS: questionJs,
+  };
+  delete definition.QuestionID;
+  delete definition.QuestionText_Unsafe;
+  await surveyApi.updateQuestion(surveyId, questionId, definition);
+}
+
+// Valid SubSelector values per Matrix Selector (mismatches cause opaque 400s).
+const MATRIX_SUBSELECTORS: Record<string, string[]> = {
+  Likert: ["SingleAnswer", "MultipleAnswer", "DL"],
+  Bipolar: ["SingleAnswer"],
+  RO: ["DND", "TX"],
+  TE: ["Short", "Medium", "Long", "Essay"],
+  CS: ["WOTB", "WTB"],
+  Profile: ["SingleAnswer", "MultipleAnswer", "DL"],
+  MaxDiff: ["SingleAnswer"],
+};
 
 export function registerQuestionTools(
   server: McpServer,
@@ -97,35 +189,91 @@ export function registerQuestionTools(
   server.registerTool(
     "create_question",
     {
-      description: "Create a question in a survey block. For simplified helpers, use add_multiple_choice_question, add_text_entry_question, add_descriptive_text_question, add_likert_question, or add_matrix_question instead.",
+      description:
+        "Create a question in a survey block with full payload control. For Matrix questions: Choices = rows/statements, Answers = columns/scale points (both required). Use additionalFields to pass any other Qualtrics question-definition fields (e.g., a template from get_question_template). For common types, prefer the add_*_question helpers.",
       annotations: { destructiveHint: false },
       inputSchema: {
         surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
         blockId: z.string().min(1).describe("The block ID to add the question to"),
         questionText: z.string().min(1).describe("The question text (HTML supported)"),
-        questionType: z.string().min(1).describe("Qualtrics question type (e.g., MC, TE, Matrix, Slider, RO, DB)"),
+        questionType: z.string().min(1).describe("Qualtrics question type (e.g., MC, TE, Matrix, Slider, RO, CS, DB)"),
         selector: z.string().min(1).describe("Question selector (e.g., SAVR, MAVR, SL, ML, Likert, TB)"),
         subSelector: z.string().optional().describe("Sub-selector if applicable (e.g., TX, SingleAnswer)"),
         choices: z.record(z.object({
           Display: z.string(),
-        })).optional().describe("Choice definitions keyed by choice number"),
+        }).passthrough()).optional().describe("Choice definitions keyed by choice number (rows/statements for Matrix)"),
+        choiceOrder: z.array(z.string()).optional().describe("Display order of choice keys (derived from choices if omitted)"),
+        answers: z.record(z.object({
+          Display: z.string(),
+        }).passthrough()).optional().describe("Answer definitions keyed by answer number (columns/scale points — required for Matrix)"),
+        answerOrder: z.array(z.string()).optional().describe("Display order of answer keys (derived from answers if omitted)"),
         validation: z.record(z.any()).optional().describe("Validation settings"),
+        configuration: z.record(z.any()).optional().describe("Configuration object (e.g., {QuestionDescriptionOption: 'UseText', TextPosition: 'inline'})"),
+        dataExportTag: z.string().trim().min(1).optional().describe("Custom export tag (recommended; a readable unique tag derived from questionText is generated if omitted)"),
+        questionDescription: z.string().optional().describe("Internal label shown in the editor (derived from questionText if omitted)"),
+        recodeValues: z.record(z.string()).optional().describe("Numeric recode mapping keyed by choice/answer id"),
         questionJS: z.string().optional().describe(QUESTION_JS_DESC),
+        additionalFields: z.record(z.any()).optional().describe("Any other question-definition fields, applied before the explicit fields above (e.g., SBS AdditionalQuestions, slider configs, a get_question_template result)"),
       },
     },
     withErrorHandling("create_question", async (args) => {
       const questionData: Record<string, any> = {
+        ...(args.additionalFields ?? {}),
         QuestionText: args.questionText,
         QuestionType: args.questionType,
         Selector: args.selector,
-        DataExportTag: nextExportTag(),
+        DataExportTag: args.dataExportTag ?? await nextExportTag(surveyApi, args.surveyId, args.questionText),
       };
       if (args.subSelector) questionData.SubSelector = args.subSelector;
-      if (args.choices) questionData.Choices = args.choices;
+      if (args.choices) {
+        questionData.Choices = args.choices;
+        questionData.ChoiceOrder = args.choiceOrder ?? Object.keys(args.choices);
+      }
+      if (args.answers) {
+        questionData.Answers = args.answers;
+        questionData.AnswerOrder = args.answerOrder ?? Object.keys(args.answers);
+      }
       if (args.validation) questionData.Validation = args.validation;
+      if (args.configuration) questionData.Configuration = args.configuration;
+      if (args.questionDescription) questionData.QuestionDescription = args.questionDescription;
+      if (args.recodeValues) questionData.RecodeValues = args.recodeValues;
       if (args.questionJS !== undefined) questionData.QuestionJS = args.questionJS;
 
+      // The Matrix schema requires these fields; fill defaults so callers don't hit
+      // Qualtrics's opaque anyOf 400 for omitting boilerplate.
+      if (args.questionType === "Matrix") {
+        questionData.QuestionDescription ??= toQuestionDescription(args.questionText);
+        questionData.Configuration ??= { QuestionDescriptionOption: "UseText" };
+        questionData.Validation ??= validationSettings(false);
+        questionData.ChoiceDataExportTags ??= false;
+        questionData.DefaultChoices ??= false;
+        questionData.Language ??= [];
+        if (!questionData.Choices) {
+          return toolError("Matrix questions require 'choices' (the rows/statements). Provide choices, or use add_matrix_question.");
+        }
+        if (!questionData.Answers) {
+          return toolError("Matrix questions require 'answers' (the columns/scale points). Provide answers, or use add_matrix_question.");
+        }
+      }
+
+      // Never forward identifiers/read-only renderings from copied definitions.
+      delete questionData.QuestionID;
+      delete questionData.QuestionText_Unsafe;
+
+      const questionJs = typeof questionData.QuestionJS === "string"
+        ? questionData.QuestionJS
+        : undefined;
+      delete questionData.QuestionJS;
+
       const result = await surveyApi.createQuestion(args.surveyId, args.blockId, questionData);
+      if (questionJs !== undefined) {
+        await attachQuestionJs(
+          surveyApi,
+          args.surveyId,
+          result.result.QuestionID,
+          questionJs
+        );
+      }
 
       const response: Record<string, any> = {
         success: true,
@@ -149,7 +297,7 @@ export function registerQuestionTools(
   server.registerTool(
     "update_question",
     {
-      description: "Update an existing question's text, choices, validation, or JavaScript",
+      description: "Update an existing question. Performs a safe partial update: fetches the current definition and carries all fields forward, so only the fields you pass change. For Matrix questions, choices = rows and answers = columns.",
       annotations: { destructiveHint: false, idempotentHint: true },
       inputSchema: {
         surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
@@ -157,33 +305,61 @@ export function registerQuestionTools(
         questionText: z.string().optional().describe("New question text"),
         choices: z.record(z.object({
           Display: z.string(),
-        })).optional().describe("Updated choice definitions"),
+        }).passthrough()).optional().describe("Updated choice definitions (rows/statements for Matrix)"),
+        choiceOrder: z.array(z.string()).optional().describe("Updated display order of choice keys (derived from choices if those change and this is omitted)"),
+        answers: z.record(z.object({
+          Display: z.string(),
+        }).passthrough()).optional().describe("Updated answer definitions (columns/scale points for Matrix)"),
+        answerOrder: z.array(z.string()).optional().describe("Updated display order of answer keys (derived from answers if those change and this is omitted)"),
         validation: z.record(z.any()).optional().describe("Updated validation settings"),
+        configuration: z.record(z.any()).optional().describe("Updated Configuration object"),
+        dataExportTag: z.string().trim().min(1).optional().describe("New export tag"),
+        recodeValues: z.record(z.string()).optional().describe("Updated numeric recode mapping"),
         questionJS: z.string().optional().describe(QUESTION_JS_DESC + ' Pass empty string "" to clear existing JS.'),
+        additionalFields: z.record(z.any()).optional().describe("Any other question-definition fields, merged into the payload last"),
       },
     },
     withErrorHandling("update_question", async (args) => {
       // Qualtrics PUT replaces the entire question — omitted fields get wiped.
-      // Always carry forward existing values so partial updates are safe.
+      // Carry forward the full current definition so partial updates are safe.
       const current = await surveyApi.getQuestion(args.surveyId, args.questionId);
-      const currentQ = current.result;
-      const data: Record<string, any> = {
-        QuestionType: currentQ.QuestionType,
-        Selector: currentQ.Selector,
-      };
-      if (currentQ.SubSelector) data.SubSelector = currentQ.SubSelector;
-
-      // Carry forward existing values, then override with user-provided values
-      if (currentQ.QuestionText !== undefined) data.QuestionText = currentQ.QuestionText;
-      if (currentQ.Choices !== undefined) data.Choices = currentQ.Choices;
-      if (currentQ.Validation !== undefined) data.Validation = currentQ.Validation;
-      if (currentQ.QuestionJS !== undefined) data.QuestionJS = currentQ.QuestionJS;
+      const data: Record<string, any> = { ...current.result };
+      delete data.QuestionID;
+      delete data.QuestionText_Unsafe;
 
       // User-provided values override existing ones
       if (args.questionText !== undefined) data.QuestionText = args.questionText;
-      if (args.choices !== undefined) data.Choices = args.choices;
+      if (args.choices !== undefined) {
+        data.Choices = args.choices;
+        data.ChoiceOrder = args.choiceOrder ?? Object.keys(args.choices);
+        const maxChoiceId = Math.max(0, ...Object.keys(args.choices).map(Number).filter(Number.isFinite));
+        if (typeof data.NextChoiceId === "number" && maxChoiceId >= data.NextChoiceId) {
+          data.NextChoiceId = maxChoiceId + 1;
+        }
+      } else if (args.choiceOrder !== undefined) {
+        data.ChoiceOrder = args.choiceOrder;
+      }
+      if (args.answers !== undefined) {
+        data.Answers = args.answers;
+        data.AnswerOrder = args.answerOrder ?? Object.keys(args.answers);
+        const maxAnswerId = Math.max(0, ...Object.keys(args.answers).map(Number).filter(Number.isFinite));
+        if (typeof data.NextAnswerId === "number" && maxAnswerId >= data.NextAnswerId) {
+          data.NextAnswerId = maxAnswerId + 1;
+        }
+      } else if (args.answerOrder !== undefined) {
+        data.AnswerOrder = args.answerOrder;
+      }
       if (args.validation !== undefined) data.Validation = args.validation;
+      if (args.configuration !== undefined) data.Configuration = args.configuration;
+      if (args.dataExportTag !== undefined) data.DataExportTag = args.dataExportTag;
+      if (args.recodeValues !== undefined) data.RecodeValues = args.recodeValues;
       if (args.questionJS !== undefined) data.QuestionJS = args.questionJS;
+      if (args.additionalFields) Object.assign(data, args.additionalFields);
+
+      // Never send immutable identifiers/read-only renderings, even when a
+      // raw patch was copied from a previous GET response.
+      delete data.QuestionID;
+      delete data.QuestionText_Unsafe;
 
       const result = await surveyApi.updateQuestion(args.surveyId, args.questionId, data);
 
@@ -243,6 +419,8 @@ export function registerQuestionTools(
         choices: z.array(z.string()).min(2).describe("Array of choice labels (e.g., ['Yes', 'No', 'Maybe'])"),
         allowMultiple: z.boolean().optional().describe("Allow selecting multiple choices (default: false)"),
         forceResponse: z.boolean().optional().describe("Require a response (default: false)"),
+        dataExportTag: z.string().trim().min(1).optional().describe("Meaningful export tag; derived uniquely from questionText if omitted"),
+        recodeValues: z.record(z.string()).optional().describe("Numeric recode mapping keyed by choice ID"),
       },
     },
     withErrorHandling("add_multiple_choice_question", async (args) => {
@@ -256,10 +434,11 @@ export function registerQuestionTools(
         QuestionType: "MC",
         Selector: args.allowMultiple ? "MAVR" : "SAVR",
         SubSelector: "TX",
-        DataExportTag: nextExportTag(),
+        DataExportTag: args.dataExportTag ?? await nextExportTag(surveyApi, args.surveyId, args.questionText),
         Choices: choicesObj,
         ChoiceOrder: args.choices.map((_: string, i: number) => String(i + 1)),
       };
+      if (args.recodeValues) questionData.RecodeValues = args.recodeValues;
 
       if (args.forceResponse) {
         questionData.Validation = {
@@ -295,6 +474,7 @@ export function registerQuestionTools(
         questionText: z.string().min(1).describe("The question text"),
         textType: z.enum(["single", "multi", "essay"]).describe("Text entry type: single line, multi line, or essay"),
         forceResponse: z.boolean().optional().describe("Require a response (default: false)"),
+        dataExportTag: z.string().trim().min(1).optional().describe("Meaningful export tag; derived uniquely from questionText if omitted"),
       },
     },
     withErrorHandling("add_text_entry_question", async (args) => {
@@ -308,7 +488,7 @@ export function registerQuestionTools(
         QuestionText: args.questionText,
         QuestionType: "TE",
         Selector: selectorMap[args.textType],
-        DataExportTag: nextExportTag(),
+        DataExportTag: args.dataExportTag ?? await nextExportTag(surveyApi, args.surveyId, args.questionText),
       };
 
       if (args.forceResponse) {
@@ -351,11 +531,16 @@ export function registerQuestionTools(
         QuestionText: args.htmlContent,
         QuestionType: "DB",
         Selector: "TB",
-        DataExportTag: nextExportTag(),
       };
-      if (args.questionJS !== undefined) questionData.QuestionJS = args.questionJS;
-
       const result = await surveyApi.createQuestion(args.surveyId, args.blockId, questionData);
+      if (args.questionJS !== undefined) {
+        await attachQuestionJs(
+          surveyApi,
+          args.surveyId,
+          result.result.QuestionID,
+          args.questionJS
+        );
+      }
 
       const response: Record<string, any> = {
         success: true,
@@ -390,6 +575,8 @@ export function registerQuestionTools(
         ),
         customLabels: z.array(z.string()).optional().describe("Custom scale labels (required when scale is 'custom', minimum 2 items)"),
         forceResponse: z.boolean().optional().describe("Require a response (default: false)"),
+        dataExportTag: z.string().trim().min(1).optional().describe("Meaningful export tag; derived uniquely from questionText if omitted"),
+        recodeValues: z.record(z.string()).optional().describe("Numeric recode mapping keyed by scale choice ID"),
       },
     },
     withErrorHandling("add_likert_question", async (args) => {
@@ -421,10 +608,11 @@ export function registerQuestionTools(
         QuestionType: "MC",
         Selector: "SAVR",
         SubSelector: "TX",
-        DataExportTag: nextExportTag(),
+        DataExportTag: args.dataExportTag ?? await nextExportTag(surveyApi, args.surveyId, args.questionText),
         Choices: choicesObj,
         ChoiceOrder: labels.map((_, i) => String(i + 1)),
       };
+      if (args.recodeValues) questionData.RecodeValues = args.recodeValues;
 
       if (args.forceResponse) {
         questionData.Validation = {
@@ -454,7 +642,8 @@ export function registerQuestionTools(
   server.registerTool(
     "add_matrix_question",
     {
-      description: "Simplified helper to create a Likert/matrix question with statements and scale points.",
+      description:
+        "Simplified helper to create a matrix question. Choices = rows/statements, Answers = columns/scale points. Defaults to a Likert single-answer matrix; use selector/subSelector for variants (e.g., selector 'CS' + subSelector 'WOTB' for matrix constant sum).",
       annotations: { destructiveHint: false },
       inputSchema: {
         surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
@@ -463,39 +652,149 @@ export function registerQuestionTools(
         statements: z.array(z.string()).min(1).describe("Array of statement/row labels"),
         scalePoints: z.array(z.string()).min(2).describe("Array of scale point labels (e.g., ['Strongly Disagree', ..., 'Strongly Agree'])"),
         forceResponse: z.boolean().optional().describe("Require a response for all statements (default: false)"),
+        selector: z.enum(["Likert", "Bipolar", "RO", "CS", "TE", "Profile", "MaxDiff"]).optional().describe("Matrix selector (default: Likert)"),
+        subSelector: z
+          .enum(["SingleAnswer", "MultipleAnswer", "DL", "DND", "TX", "Short", "Medium", "Long", "Essay", "WOTB", "WTB"])
+          .optional()
+          .describe("Sub-selector; must match the selector. Likert: SingleAnswer|MultipleAnswer|DL, RO: DND|TX, TE: Short|Medium|Long|Essay, CS: WOTB|WTB (default: SingleAnswer for Likert)"),
+        dataExportTag: z.string().trim().min(1).optional().describe("Custom export tag for the question column names (recommended; derived uniquely from questionText if omitted)"),
+        recodeValues: z.record(z.string()).optional().describe("Numeric recode mapping for scale points, keyed by answer id, e.g., {\"1\": \"1\", \"2\": \"2\"}"),
       },
     },
     withErrorHandling("add_matrix_question", async (args) => {
-      const choices: Record<string, { Display: string }> = {};
-      args.statements.forEach((stmt: string, index: number) => {
-        choices[String(index + 1)] = { Display: stmt };
-      });
-
-      const answers: Record<string, { Display: string }> = {};
-      args.scalePoints.forEach((point: string, index: number) => {
-        answers[String(index + 1)] = { Display: point };
-      });
+      const selector = args.selector ?? "Likert";
+      const validSubs = MATRIX_SUBSELECTORS[selector];
+      const subSelector = args.subSelector ?? validSubs[0];
+      if (!validSubs.includes(subSelector)) {
+        return toolError(
+          `SubSelector '${subSelector}' is not valid for Matrix selector '${selector}'. Valid options: ${validSubs.join(", ")}.`
+        );
+      }
 
       const questionData: Record<string, any> = {
         QuestionText: args.questionText,
+        QuestionDescription: toQuestionDescription(args.questionText),
         QuestionType: "Matrix",
-        Selector: "Likert",
-        SubSelector: "SingleAnswer",
-        DataExportTag: nextExportTag(),
-        Choices: choices,
-        ChoiceOrder: args.statements.map((_: string, i: number) => String(i + 1)),
-        Answers: answers,
-        AnswerOrder: args.scalePoints.map((_: string, i: number) => String(i + 1)),
+        Selector: selector,
+        SubSelector: subSelector,
+        DataExportTag: args.dataExportTag ?? await nextExportTag(surveyApi, args.surveyId, args.questionText),
+        Choices: buildDisplayMap(args.statements),
+        ChoiceOrder: orderKeys(args.statements.length),
+        Answers: buildDisplayMap(args.scalePoints),
+        AnswerOrder: orderKeys(args.scalePoints.length),
+        ChoiceDataExportTags: false,
+        DefaultChoices: false,
+        Configuration: { QuestionDescriptionOption: "UseText" },
+        Language: [],
+        Validation: validationSettings(args.forceResponse),
+        NextChoiceId: args.statements.length + 1,
+        NextAnswerId: args.scalePoints.length + 1,
+      };
+      if (args.recodeValues) questionData.RecodeValues = args.recodeValues;
+
+      const result = await surveyApi.createQuestion(args.surveyId, args.blockId, questionData);
+      return toolSuccess({
+        success: true,
+        surveyId: args.surveyId,
+        blockId: args.blockId,
+        questionId: result.result.QuestionID,
+        questionType: `Matrix (${selector}/${subSelector})`,
+        statementCount: args.statements.length,
+        scalePointCount: args.scalePoints.length,
+        message: "Matrix question created successfully",
+      });
+    })
+  );
+
+  // Add rank order question (simplified)
+  server.registerTool(
+    "add_rank_order_question",
+    {
+      description: "Simplified helper to create a rank order question where respondents rank a list of items.",
+      annotations: { destructiveHint: false },
+      inputSchema: {
+        surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
+        blockId: z.string().min(1).describe("The block ID to add the question to"),
+        questionText: z.string().min(1).describe("The question text/instructions"),
+        items: z.array(z.string()).min(2).describe("Array of item labels to rank"),
+        selector: z.enum(["SB", "DND", "TX"]).optional().describe("DND = drag and drop (default and the only variation in the New Survey Taking Experience); SB = select box and TX = text box are legacy-experience variations"),
+        forceResponse: z.boolean().optional().describe("Require a response (default: false)"),
+        dataExportTag: z.string().trim().min(1).optional().describe("Custom export tag (recommended; generated uniquely if omitted)"),
+      },
+    },
+    withErrorHandling("add_rank_order_question", async (args) => {
+      const questionData: Record<string, any> = {
+        QuestionText: args.questionText,
+        QuestionDescription: toQuestionDescription(args.questionText),
+        QuestionType: "RO",
+        Selector: args.selector ?? "DND",
+        DataExportTag: args.dataExportTag ?? await nextExportTag(surveyApi, args.surveyId, args.questionText),
+        Choices: buildDisplayMap(args.items),
+        ChoiceOrder: orderKeys(args.items.length),
+        Configuration: { QuestionDescriptionOption: "UseText" },
+        Language: [],
+        Validation: validationSettings(args.forceResponse),
+        NextChoiceId: args.items.length + 1,
+        NextAnswerId: 1,
       };
 
-      if (args.forceResponse) {
-        questionData.Validation = {
-          Settings: {
-            ForceResponse: "ON",
-            ForceResponseType: "ON",
-            Type: "None",
-          },
-        };
+      const result = await surveyApi.createQuestion(args.surveyId, args.blockId, questionData);
+      return toolSuccess({
+        success: true,
+        surveyId: args.surveyId,
+        blockId: args.blockId,
+        questionId: result.result.QuestionID,
+        questionType: `Rank Order (${args.selector ?? "DND"})`,
+        itemCount: args.items.length,
+        message: "Rank order question created successfully",
+      });
+    })
+  );
+
+  // Add constant sum question (simplified)
+  server.registerTool(
+    "add_constant_sum_question",
+    {
+      description:
+        "Simplified helper to create a constant sum question where respondents allocate values across items (e.g., percentages summing to 100). The default Choices/text-entry variation works in the New Survey Taking Experience; bars and slider variations require the legacy experience.",
+      annotations: { destructiveHint: false },
+      inputSchema: {
+        surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
+        blockId: z.string().min(1).describe("The block ID to add the question to"),
+        questionText: z.string().min(1).describe("The question text/instructions"),
+        items: z.array(z.string()).min(2).describe("Array of item labels to allocate values across"),
+        total: z.number().optional().describe("If set, entries must sum to exactly this total (e.g., 100)"),
+        selector: z.enum(["VRTL", "HBAR", "HSLIDER"]).optional().describe("VRTL = Choices/text boxes (default; current experience compatible), HBAR = bars and HSLIDER = sliders (legacy experience only)"),
+        forceResponse: z.boolean().optional().describe("Require a response (default: false)"),
+        dataExportTag: z.string().trim().min(1).optional().describe("Custom export tag (recommended; generated uniquely if omitted)"),
+      },
+    },
+    withErrorHandling("add_constant_sum_question", async (args) => {
+      const validation = validationSettings(args.forceResponse);
+      if (args.total !== undefined) {
+        validation.Settings.Type = "ChoicesTotal";
+        validation.Settings.EnforceRange = null;
+        validation.Settings.ChoiceTotal = String(args.total);
+      }
+
+      const questionData: Record<string, any> = {
+        QuestionText: args.questionText,
+        QuestionDescription: toQuestionDescription(args.questionText),
+        QuestionType: "CS",
+        Selector: args.selector ?? "VRTL",
+        DataExportTag: args.dataExportTag ?? await nextExportTag(surveyApi, args.surveyId, args.questionText),
+        Choices: buildDisplayMap(args.items),
+        ChoiceOrder: orderKeys(args.items.length),
+        Configuration: { QuestionDescriptionOption: "UseText" },
+        Language: [],
+        Validation: validation,
+        NextChoiceId: args.items.length + 1,
+        NextAnswerId: 1,
+      };
+      if (args.selector === "HSLIDER" || args.selector === "HBAR") {
+        questionData.Configuration.CSSliderMin = 0;
+        questionData.Configuration.CSSliderMax = args.total ?? 100;
+        questionData.Configuration.GridLines = 10;
       }
 
       const result = await surveyApi.createQuestion(args.surveyId, args.blockId, questionData);
@@ -504,10 +803,39 @@ export function registerQuestionTools(
         surveyId: args.surveyId,
         blockId: args.blockId,
         questionId: result.result.QuestionID,
-        questionType: "Matrix (Likert)",
-        statementCount: args.statements.length,
-        scalePointCount: args.scalePoints.length,
-        message: "Matrix question created successfully",
+        questionType: `Constant Sum (${args.selector ?? "VRTL"})`,
+        itemCount: args.items.length,
+        total: args.total,
+        message: "Constant sum question created successfully",
+      });
+    })
+  );
+
+  // Get question template (for cloning)
+  server.registerTool(
+    "get_question_template",
+    {
+      description:
+        "Get a question's full definition stripped of server-generated fields, ready to reuse as a create_question template (pass it via additionalFields). Best way to replicate complex question types (side-by-side, sliders, heatmaps): build one in the Qualtrics UI, then clone it via the API.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
+        questionId: z.string().min(1).describe("The question ID to use as a template (e.g., QID1)"),
+      },
+    },
+    withErrorHandling("get_question_template", async (args) => {
+      const result = await surveyApi.getQuestion(args.surveyId, args.questionId);
+      const template = { ...result.result };
+      delete template.QuestionID;
+      delete template.QuestionText_Unsafe;
+      delete template.QuestionText;
+      delete template.DataExportTag;
+      return toolSuccess({
+        surveyId: args.surveyId,
+        sourceQuestionId: args.questionId,
+        template,
+        usage:
+          "Pass this object as create_question's additionalFields. create_question always applies its explicit questionText, questionType, selector, and new dataExportTag after the template.",
       });
     })
   );

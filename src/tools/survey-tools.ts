@@ -16,16 +16,15 @@ export function registerSurveyTools(
   server.registerTool(
     "list_surveys",
     {
-      description: "List surveys with optional filtering and pagination",
+      description: "List one Qualtrics-managed page of surveys with optional name filtering; use nextPage to continue",
       annotations: { readOnlyHint: true },
       inputSchema: {
         offset: z.number().optional().describe("Starting offset for pagination (default: 0)"),
-        limit: z.number().max(100).optional().describe("Maximum number of surveys to return (max: 100, default: 20)"),
-        filter: z.string().optional().describe("Filter surveys by name (case-insensitive partial match)"),
+        filter: z.string().optional().describe("Filter this returned page by name (case-insensitive partial match)"),
       },
     },
     withErrorHandling("list_surveys", async (args) => {
-      const surveys = await client.getSurveys(args.offset ?? 0, args.limit ?? 20);
+      const surveys = await client.getSurveys(args.offset ?? 0);
 
       let filteredSurveys = surveys.result.elements;
       if (args.filter) {
@@ -43,10 +42,11 @@ export function registerSurveyTools(
           lastModified: survey.lastModified,
           creationDate: survey.creationDate,
         })),
-        total: surveys.result.totalElements,
         offset: args.offset ?? 0,
-        limit: args.limit ?? 20,
-        filtered: args.filter ? filteredSurveys.length : surveys.result.elements.length,
+        returned: filteredSurveys.length,
+        pageSize: surveys.result.elements.length,
+        nextPage: surveys.result.nextPage ?? null,
+        filterApplied: args.filter ?? null,
       });
     })
   );
@@ -109,33 +109,39 @@ export function registerSurveyTools(
   server.registerTool(
     "estimate_export_size",
     {
-      description: "Estimate the size of a survey export before downloading. Helps you decide whether to use saveToFile parameter or apply filters to reduce size.",
+      description: "Estimate export size from the survey's question count and an optional expected response count. Qualtrics survey metadata does not expose response totals, so omitting expectedResponseCount returns an honest per-response estimate.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
         format: z.enum(["json", "csv"]).optional().describe("Export format to estimate (default: json)"),
+        expectedResponseCount: z.number().int().nonnegative().optional().describe("Expected number of responses; omit for a per-response estimate"),
       },
     },
     withErrorHandling("estimate_export_size", async (args) => {
-      const [surveyInfo, surveyDefinition] = await Promise.all([
-        client.getSurvey(args.surveyId),
-        client.getSurveyDefinition(args.surveyId),
-      ]);
+      const surveyDefinition = await client.getSurveyDefinition(args.surveyId);
+      const questions = surveyDefinition.result.Questions ?? surveyDefinition.result.questions ?? {};
+      const questionCount = Object.keys(questions).length;
+      const responseCount = args.expectedResponseCount;
+      const format = args.format ?? "json";
 
-      const responseCount = surveyInfo.result.responseExportTotal || 0;
-      const questionCount = surveyDefinition.result.questions ? Object.keys(surveyDefinition.result.questions).length : 0;
+      const bytesPerResponseQuestion = format === "json" ? 500 : 50;
+      const baseOverhead = format === "json" ? 10000 : 1000;
+      const estimatedBytesPerResponse = questionCount * bytesPerResponseQuestion;
+      const estimatedBytes = responseCount === undefined
+        ? null
+        : (responseCount * estimatedBytesPerResponse) + baseOverhead;
+      const estimatedMB = estimatedBytes === null
+        ? null
+        : (estimatedBytes / (1024 * 1024)).toFixed(2);
 
-      const bytesPerResponseQuestion = args.format === "json" ? 500 : 50;
-      const baseOverhead = args.format === "json" ? 10000 : 1000;
-      const estimatedBytes = (responseCount * questionCount * bytesPerResponseQuestion) + baseOverhead;
-      const estimatedMB = (estimatedBytes / (1024 * 1024)).toFixed(2);
-
-      const isLargeExport = estimatedBytes > 100 * 1024;
-      const isVeryLargeExport = estimatedBytes > 10 * 1024 * 1024;
+      const isLargeExport = estimatedBytes !== null && estimatedBytes > 100 * 1024;
+      const isVeryLargeExport = estimatedBytes !== null && estimatedBytes > 10 * 1024 * 1024;
 
       let recommendation = "";
-      if (isVeryLargeExport) {
-        recommendation = "VERY LARGE EXPORT EXPECTED: Strongly recommend using 'export_responses_filtered' with date ranges, specific questions, or completion filters to reduce size. Also use 'saveToFile' parameter.";
+      if (estimatedBytes === null) {
+        recommendation = `Estimated ${estimatedBytesPerResponse} bytes per response. Supply expectedResponseCount for a total-size estimate.`;
+      } else if (isVeryLargeExport) {
+        recommendation = "VERY LARGE EXPORT EXPECTED: Strongly recommend using 'export_responses_filtered' with date ranges, specific questions, or a saved Qualtrics filter to reduce size. Also use 'saveToFile' parameter.";
       } else if (isLargeExport) {
         recommendation = "LARGE EXPORT EXPECTED: Consider using 'saveToFile' parameter to save directly to Downloads folder. The export will be automatically saved if it exceeds 100KB.";
       } else {
@@ -144,7 +150,7 @@ export function registerSurveyTools(
 
       return toolSuccess({
         surveyId: args.surveyId,
-        format: args.format,
+        format,
         estimatedSize: {
           bytes: estimatedBytes,
           megabytes: estimatedMB,
@@ -154,11 +160,14 @@ export function registerSurveyTools(
         surveyMetrics: {
           responseCount,
           questionCount,
+          estimatedBytesPerResponse,
           estimationBasis: `${bytesPerResponseQuestion} bytes per response-question pair`,
         },
         recommendation,
-        nextSteps: isVeryLargeExport
-          ? "Consider using export_responses_filtered with filters like: startDate, endDate, questionIds, or filterType to reduce size."
+        nextSteps: estimatedBytes === null
+          ? "Rerun with expectedResponseCount, or start the export asynchronously and monitor it with check_export_status."
+          : isVeryLargeExport
+          ? "Consider using export_responses_filtered with filters like startDate, endDate, questionIds, or filterId to reduce size."
           : isLargeExport
             ? "Use export_responses with saveToFile='my_survey_data.csv' to save directly to Downloads folder."
             : "You can proceed with export_responses normally. Small file will be returned directly.",
@@ -174,14 +183,14 @@ export function registerSurveyTools(
       annotations: { destructiveHint: false, idempotentHint: true },
       inputSchema: {
         surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
-        name: z.string().optional().describe("New survey name"),
+        name: z.string().trim().min(1).optional().describe("New survey name"),
         isActive: z.boolean().optional().describe("Set survey active/inactive status"),
         expiration: z.string().optional().describe("Survey expiration date (ISO format)"),
       },
     },
     withErrorHandling("update_survey", async (args) => {
       const data: Record<string, any> = {};
-      if (args.name !== undefined) data.SurveyName = args.name;
+      if (args.name !== undefined) data.name = args.name;
       if (args.isActive !== undefined) data.isActive = args.isActive;
       if (args.expiration !== undefined) data.expiration = { startDate: null, endDate: args.expiration };
 

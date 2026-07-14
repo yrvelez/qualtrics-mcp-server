@@ -15,7 +15,7 @@ export class WebhookApi {
   }
 
   async deleteWebhook(subscriptionId: string): Promise<any> {
-    return this.client.makeRequest(`/eventsubscriptions/${subscriptionId}`, {
+    return this.client.makeRequest(`/eventsubscriptions/${encodeURIComponent(subscriptionId)}`, {
       method: "DELETE",
     });
   }

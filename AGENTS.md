@@ -21,14 +21,6 @@ See `examples/motivated-reasoning-study.ts` for a complete MCP-only example of b
 - **Survey flow structure**: the full flow array with FlowID numbering, Block references, EmbeddedData nodes, and nested BlockRandomizer/Group elements
 - **Safe completion**: patching survey options, validating the design, and creating an unpublished draft version without activating the survey
 
-## Matrix Questions
-
-- Use `add_matrix_question` for matrix/Likert grids. **`Choices` = rows/statements, `Answers` = columns/scale points** — both required, keyed by numeric strings (`"1"`, `"2"`, ...).
-- Valid Selector → SubSelector pairs: `Likert` → `SingleAnswer`/`MultipleAnswer`/`DL`; `RO` → `DND`/`TX`; `TE` → `Short`/`Medium`/`Long`/`Essay`; `CS` → `WOTB`/`WTB`; `Bipolar`/`MaxDiff` → `SingleAnswer`. Mismatches cause opaque 400s.
-- The Matrix create schema also requires `ChoiceDataExportTags`, `DefaultChoices`, `Configuration`, `QuestionDescription`, `Language`, and `Validation` — the tools fill these defaults automatically.
-- In the New Survey Taking Experience (formerly Simple Layout), use Rank Order `DND` and Constant Sum `VRTL`. Rank Order `SB`/`TX` and Constant Sum `HBAR`/`HSLIDER` are legacy-experience variations.
-- For exotic types (side-by-side, sliders, heatmaps): build one question in the Qualtrics UI, fetch it with `get_question_template`, and clone it via `create_question`'s `additionalFields`.
-
 ## Qualtrics API Conventions
 
 - **DataExportTag**: Must be set on every question that collects data. Qualtrics auto-generates tags like `Q1`, `Q2` if omitted, making exported data hard to interpret.

@@ -3,8 +3,26 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { QualtricsClient } from "../services/qualtrics-client.js";
 import { ResponseApi } from "../services/response-api.js";
 import { QualtricsConfig } from "../config/settings.js";
-import { toolSuccess, withErrorHandling, requireDeleteConfirmation } from "./_helpers.js";
-import { saveExportToFile } from "../utils/file-save.js";
+import { toolError, toolSuccess, withErrorHandling, requireDeleteConfirmation } from "./_helpers.js";
+import { consumeExportDownload } from "../utils/file-save.js";
+
+export function exportJobState(result: any): {
+  status: string;
+  complete: boolean;
+  failed: boolean;
+  fileId: string | null;
+} {
+  const status = String(result?.status ?? "").toLowerCase();
+  const fileId = typeof result?.fileId === "string" && result.fileId.length > 0
+    ? result.fileId
+    : null;
+  return {
+    status,
+    complete: status === "complete" && fileId !== null,
+    failed: status === "failed",
+    fileId,
+  };
+}
 
 export function registerResponseTools(
   server: McpServer,
@@ -17,8 +35,8 @@ export function registerResponseTools(
   server.registerTool(
     "export_responses",
     {
-      description: "Export survey responses in JSON or CSV format. IMPORTANT: This tool will automatically save large exports to a local file to avoid context limits. Small exports may be returned directly. For better control over data size, consider using 'export_responses_filtered' with date ranges, specific questions, or completion filters.",
-      annotations: { readOnlyHint: true },
+      description: "Export survey responses in JSON or CSV format. IMPORTANT: This tool will automatically save large exports to a local file to avoid context limits. Small exports may be returned directly. For better control over data size, consider using 'export_responses_filtered' with date ranges, specific questions, or a saved Qualtrics filter.",
+      annotations: { readOnlyHint: false },
       inputSchema: {
         surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
         format: z.enum(["json", "csv"]).optional().describe("Export format (default: json)"),
@@ -27,14 +45,16 @@ export function registerResponseTools(
       },
     },
     async (args) => {
+      const format = args.format ?? "json";
       try {
-        const exportJob = await client.startResponseExport(args.surveyId, args.format ?? "json");
+        const exportJob = await client.startResponseExport(args.surveyId, format);
         const progressId = exportJob.result.progressId;
 
-        if (!args.waitForCompletion) {
+        if (args.waitForCompletion === false) {
           return toolSuccess({
             status: "started",
             progressId,
+            format,
             message: "Export started. Use check_export_status to monitor progress.",
           });
         }
@@ -45,40 +65,48 @@ export function registerResponseTools(
         while (attempts < maxAttempts) {
           await new Promise(resolve => setTimeout(resolve, 10000));
           const progress = await client.getResponseExportProgress(args.surveyId, progressId);
+          const state = exportJobState(progress.result);
 
-          if (progress.result.percentComplete === 100) {
-            const fileData = await client.downloadResponseExportFile(args.surveyId, progress.result.fileId);
-            const fileSizeBytes = Buffer.byteLength(fileData, "utf8");
-            const fileSizeMB = (fileSizeBytes / (1024 * 1024)).toFixed(2);
-            const isLargeFile = fileSizeBytes > 100 * 1024;
+          if (state.failed) {
+            return toolError(
+              `Qualtrics response export failed at ${String(progress.result.percentComplete)}% (progressId ${progressId}).`
+            );
+          }
+          if (state.complete) {
+            const downloaded = await consumeExportDownload(
+              client.downloadResponseExportChunks(args.surveyId, state.fileId!),
+              args.surveyId,
+              format,
+              args.saveToFile
+            );
 
-            if (args.saveToFile || isLargeFile) {
-              const saved = await saveExportToFile(fileData, args.surveyId, args.format ?? "json", args.saveToFile);
-              const message = saved.wasAutoSaved
-                ? `Large export (${saved.fileSizeMB}MB) automatically saved to avoid context limits. File location: ${saved.filePath}`
-                : `Export saved to ${saved.filePath}`;
+            if (downloaded.savedToFile) {
+              const message = downloaded.wasAutoSaved
+                ? `Large export (${downloaded.fileSizeMB}MB) automatically saved to avoid context limits. File location: ${downloaded.savedToFile}`
+                : `Export saved to ${downloaded.savedToFile}`;
 
               return toolSuccess({
                 status: "completed",
-                format: args.format,
-                savedToFile: saved.filePath,
-                fileSize: saved.fileSizeBytes,
-                fileSizeMB: saved.fileSizeMB,
-                wasAutoSaved: saved.wasAutoSaved,
+                format,
+                savedToFile: downloaded.savedToFile,
+                fileSize: downloaded.fileSizeBytes,
+                fileSizeMB: downloaded.fileSizeMB,
+                wasAutoSaved: downloaded.wasAutoSaved,
                 message,
-                instructions: `The export file is now available at: ${saved.filePath}\n\nTo analyze this data:\n1. Navigate to your Downloads folder\n2. Open the file in your preferred tool (Excel, R, Python, etc.)\n3. Or drag and drop it into a data analysis application\n\nThe file is ready for immediate use!`,
-                metadata: { progressId, fileId: progress.result.fileId },
+                instructions: `The export file is now available at: ${downloaded.savedToFile}\n\nTo analyze this data:\n1. Navigate to your Downloads folder\n2. Open the file in your preferred tool (Excel, R, Python, etc.)\n3. Or drag and drop it into a data analysis application\n\nThe file is ready for immediate use!`,
+                metadata: { progressId, fileId: state.fileId },
               });
             } else {
+              const fileData = downloaded.data ?? "";
               return toolSuccess({
                 status: "completed",
-                format: args.format,
-                fileSize: fileSizeBytes,
-                fileSizeMB,
-                data: args.format === "json" ? JSON.parse(fileData) : fileData,
-                message: `Small export (${fileSizeMB}MB) returned directly`,
+                format,
+                fileSize: downloaded.fileSizeBytes,
+                fileSizeMB: downloaded.fileSizeMB,
+                data: format === "json" ? JSON.parse(fileData) : fileData,
+                message: `Small export (${downloaded.fileSizeMB}MB) returned directly`,
                 tip: "For larger exports, consider using the 'saveToFile' parameter to save directly to your Downloads folder for easier analysis.",
-                metadata: { progressId, fileId: progress.result.fileId },
+                metadata: { progressId, fileId: state.fileId },
               });
             }
           }
@@ -92,52 +120,11 @@ export function registerResponseTools(
         });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-
-        try {
-          const fallbackJob = await client.startResponseExport(args.surveyId, "csv");
-          const fallbackProgressId = fallbackJob.result.progressId;
-
-          let attempts = 0;
-          const maxAttempts = 30;
-
-          while (attempts < maxAttempts) {
-            await new Promise(resolve => setTimeout(resolve, 10000));
-            const progress = await client.getResponseExportProgress(args.surveyId, fallbackProgressId);
-
-            if (progress.result.percentComplete === 100) {
-              const fileData = await client.downloadResponseExportFile(args.surveyId, progress.result.fileId);
-              const saved = await saveExportToFile(fileData, args.surveyId, "csv");
-
-              return toolSuccess({
-                status: "completed_via_fallback",
-                originalError: errorMessage,
-                format: "csv",
-                savedToFile: saved.filePath,
-                fileSize: saved.fileSizeBytes,
-                message: `Original export failed, but CSV export succeeded and was saved to: ${saved.filePath}`,
-                metadata: { fallbackProgressId, fileId: progress.result.fileId },
-              });
-            }
-            attempts++;
-          }
-
-          return toolSuccess({
-            status: "fallback_timeout",
-            originalError: errorMessage,
-            progressId: fallbackProgressId,
-            message: "Both original export and CSV fallback are taking longer than expected. Use check_export_status to monitor the CSV export progress.",
-          });
-        } catch (fallbackError) {
-          const fallbackErrorMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-          const helpText = errorMessage.toLowerCase().includes("timeout") || errorMessage.toLowerCase().includes("too large")
-            ? " TIP: Try using 'export_responses_filtered' with date ranges, specific questions, or completion filters to reduce file size."
-            : " You may need to log into Qualtrics directly to export manually if the issue persists.";
-
-          return {
-            content: [{ type: "text" as const, text: `Error exporting responses: ${errorMessage}. CSV fallback also failed: ${fallbackErrorMessage}.${helpText}` }],
-            isError: true,
-          };
-        }
+        const helpText = errorMessage.toLowerCase().includes("timeout") ||
+          errorMessage.toLowerCase().includes("too large")
+          ? " Try export_responses_filtered with a date range, selected questions, or a saved Qualtrics filter."
+          : " The original export job was not silently retried; retry explicitly after addressing the error.";
+        return toolError(`Error exporting responses: ${errorMessage}.${helpText}`);
       }
     }
   );
@@ -155,13 +142,72 @@ export function registerResponseTools(
     },
     withErrorHandling("check_export_status", async (args) => {
       const progress = await client.getResponseExportProgress(args.surveyId, args.exportProgressId);
+      const state = exportJobState(progress.result);
 
       return toolSuccess({
         progressId: args.exportProgressId,
         percentComplete: progress.result.percentComplete,
         status: progress.result.status,
-        isComplete: progress.result.percentComplete === 100,
-        fileId: progress.result.fileId || null,
+        isComplete: state.complete,
+        isFailed: state.failed,
+        fileId: state.fileId,
+      });
+    })
+  );
+
+  // Download a completed export by file ID
+  server.registerTool(
+    "download_export_file",
+    {
+      description:
+        "Download a completed response export using the fileId returned by check_export_status. Saves large files automatically and can save any export to a requested filename.",
+      annotations: { readOnlyHint: false },
+      inputSchema: {
+        surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
+        fileId: z.string().min(1).describe("Completed export file ID"),
+        format: z.enum(["json", "csv"]).optional().describe("Export format (default: json)"),
+        saveToFile: z.string().optional().describe("Optional filename in the Downloads folder"),
+      },
+    },
+    withErrorHandling("download_export_file", async (args) => {
+      const format = args.format ?? "json";
+      const downloaded = await consumeExportDownload(
+        client.downloadResponseExportChunks(args.surveyId, args.fileId),
+        args.surveyId,
+        format,
+        args.saveToFile
+      );
+
+      if (downloaded.savedToFile) {
+        return toolSuccess({
+          status: "completed",
+          surveyId: args.surveyId,
+          fileId: args.fileId,
+          format,
+          savedToFile: downloaded.savedToFile,
+          fileSize: downloaded.fileSizeBytes,
+          fileSizeMB: downloaded.fileSizeMB,
+          wasAutoSaved: downloaded.wasAutoSaved,
+        });
+      }
+
+      const fileData = downloaded.data ?? "";
+      let data: unknown = fileData;
+      if (format === "json") {
+        try {
+          data = JSON.parse(fileData);
+        } catch {
+          // Preserve the raw payload so the caller can inspect malformed or
+          // unexpectedly wrapped exports instead of losing the download.
+        }
+      }
+      return toolSuccess({
+        status: "completed",
+        surveyId: args.surveyId,
+        fileId: args.fileId,
+        format,
+        fileSize: downloaded.fileSizeBytes,
+        data,
       });
     })
   );
@@ -170,8 +216,8 @@ export function registerResponseTools(
   server.registerTool(
     "export_responses_filtered",
     {
-      description: "Export survey responses with filters to reduce data size. RECOMMENDED for large surveys or when analyzing specific subsets. Use date filters, question selection, or completion status to create manageable datasets for analysis. Large exports will be automatically saved to your Downloads folder.",
-      annotations: { readOnlyHint: true },
+      description: "Export survey responses with documented Qualtrics filters to reduce data size. Use date bounds, a saved Qualtrics filter, question selection, or inclusion of responses still in progress. Large exports will be automatically saved to your Downloads folder.",
+      annotations: { readOnlyHint: false },
       inputSchema: {
         surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
         format: z.enum(["json", "csv"]).optional().describe("Export format (default: json)"),
@@ -179,20 +225,31 @@ export function registerResponseTools(
         saveToFile: z.string().optional().describe("RECOMMENDED: Specify a filename (e.g. 'filtered_survey.csv') to save the export to your Downloads folder."),
         startDate: z.string().optional().describe("Start date filter (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)"),
         endDate: z.string().optional().describe("End date filter (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)"),
-        filterType: z.enum(["complete", "incomplete", "all"]).optional().describe("Response completion filter (default: all)"),
-        includeDisplayOrder: z.boolean().optional().describe("Include display order in export (default: true)"),
+        filterId: z.string().min(1).optional().describe("ID of a saved Qualtrics response filter"),
+        includeResponsesInProgress: z.boolean().optional().describe("Include responses that are still in progress as well as recorded responses (Qualtrics exportResponsesInProgress; default: false)"),
+        includeDisplayOrder: z.boolean().optional().describe("Include display-order fields in a CSV export (Qualtrics default when omitted: false)"),
         useLabels: z.boolean().optional().describe("Use choice labels instead of values (default: false)"),
         questionIds: z.array(z.string()).optional().describe("Specific question IDs to include (export only these questions) - HIGHLY RECOMMENDED for large surveys to reduce file size"),
         embeddedDataIds: z.array(z.string()).optional().describe("Specific embedded data fields to include - helps reduce unnecessary metadata"),
       },
     },
     async (args) => {
+      const format = args.format ?? "json";
+      const filters: Record<string, unknown> = {};
       try {
-        const filters: any = {};
+        if (
+          format === "json" &&
+          (args.includeDisplayOrder !== undefined || args.useLabels !== undefined)
+        ) {
+          return toolError(
+            "includeDisplayOrder and useLabels are only supported for CSV exports; omit them or set format to 'csv'."
+          );
+        }
         if (args.startDate) filters.startDate = args.startDate;
         if (args.endDate) filters.endDate = args.endDate;
-        if (args.filterType && args.filterType !== "all") {
-          filters.filterType = args.filterType === "complete" ? "finished" : "unfinished";
+        if (args.filterId) filters.filterId = args.filterId;
+        if (args.includeResponsesInProgress !== undefined) {
+          filters.exportResponsesInProgress = args.includeResponsesInProgress;
         }
         if (args.includeDisplayOrder !== undefined) filters.includeDisplayOrder = args.includeDisplayOrder;
         if (args.useLabels !== undefined) filters.useLabels = args.useLabels;
@@ -201,15 +258,16 @@ export function registerResponseTools(
 
         const exportJob = await client.startResponseExport(
           args.surveyId,
-          args.format ?? "json",
+          format,
           Object.keys(filters).length > 0 ? filters : undefined
         );
         const progressId = exportJob.result.progressId;
 
-        if (!args.waitForCompletion) {
+        if (args.waitForCompletion === false) {
           return toolSuccess({
             status: "started",
             progressId,
+            format,
             filters,
             message: "Filtered export started. Use check_export_status to monitor progress.",
           });
@@ -221,42 +279,51 @@ export function registerResponseTools(
         while (attempts < maxAttempts) {
           await new Promise(resolve => setTimeout(resolve, 10000));
           const progress = await client.getResponseExportProgress(args.surveyId, progressId);
+          const state = exportJobState(progress.result);
 
-          if (progress.result.percentComplete === 100) {
-            const fileData = await client.downloadResponseExportFile(args.surveyId, progress.result.fileId);
-            const fileSizeBytes = Buffer.byteLength(fileData, "utf8");
-            const fileSizeMB = (fileSizeBytes / (1024 * 1024)).toFixed(2);
-            const isLargeFile = fileSizeBytes > 100 * 1024;
+          if (state.failed) {
+            return toolError(
+              `Qualtrics filtered response export failed at ${String(progress.result.percentComplete)}% (progressId ${progressId}).`
+            );
+          }
+          if (state.complete) {
+            const downloaded = await consumeExportDownload(
+              client.downloadResponseExportChunks(args.surveyId, state.fileId!),
+              args.surveyId,
+              format,
+              args.saveToFile,
+              "filtered"
+            );
 
-            if (args.saveToFile || isLargeFile) {
-              const saved = await saveExportToFile(fileData, args.surveyId, args.format ?? "json", args.saveToFile, "filtered");
-              const message = saved.wasAutoSaved
-                ? `Large filtered export (${saved.fileSizeMB}MB) automatically saved to avoid context limits. File location: ${saved.filePath}`
-                : `Filtered export saved to ${saved.filePath}`;
+            if (downloaded.savedToFile) {
+              const message = downloaded.wasAutoSaved
+                ? `Large filtered export (${downloaded.fileSizeMB}MB) automatically saved to avoid context limits. File location: ${downloaded.savedToFile}`
+                : `Filtered export saved to ${downloaded.savedToFile}`;
 
               return toolSuccess({
                 status: "completed",
-                format: args.format,
+                format,
                 filters,
-                savedToFile: saved.filePath,
-                fileSize: saved.fileSizeBytes,
-                fileSizeMB: saved.fileSizeMB,
-                wasAutoSaved: saved.wasAutoSaved,
+                savedToFile: downloaded.savedToFile,
+                fileSize: downloaded.fileSizeBytes,
+                fileSizeMB: downloaded.fileSizeMB,
+                wasAutoSaved: downloaded.wasAutoSaved,
                 message,
-                instructions: `The filtered export file is now available at: ${saved.filePath}\n\nTo analyze this data:\n1. Navigate to your Downloads folder\n2. Open the file in your preferred tool (Excel, R, Python, etc.)\n3. Or drag and drop it into a data analysis application\n\nThe file is ready for immediate use!`,
-                metadata: { progressId, fileId: progress.result.fileId },
+                instructions: `The filtered export file is now available at: ${downloaded.savedToFile}\n\nTo analyze this data:\n1. Navigate to your Downloads folder\n2. Open the file in your preferred tool (Excel, R, Python, etc.)\n3. Or drag and drop it into a data analysis application\n\nThe file is ready for immediate use!`,
+                metadata: { progressId, fileId: state.fileId },
               });
             } else {
+              const fileData = downloaded.data ?? "";
               return toolSuccess({
                 status: "completed",
-                format: args.format,
+                format,
                 filters,
-                fileSize: fileSizeBytes,
-                fileSizeMB,
-                data: args.format === "json" ? JSON.parse(fileData) : fileData,
-                message: `Small filtered export (${fileSizeMB}MB) returned directly`,
+                fileSize: downloaded.fileSizeBytes,
+                fileSizeMB: downloaded.fileSizeMB,
+                data: format === "json" ? JSON.parse(fileData) : fileData,
+                message: `Small filtered export (${downloaded.fileSizeMB}MB) returned directly`,
                 tip: "For larger exports, consider using the 'saveToFile' parameter to save directly to your Downloads folder for easier analysis.",
-                metadata: { progressId, fileId: progress.result.fileId },
+                metadata: { progressId, fileId: state.fileId },
               });
             }
           }
@@ -271,61 +338,10 @@ export function registerResponseTools(
         });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-
-        try {
-          const fallbackFilters: any = {};
-          if (args.startDate) fallbackFilters.startDate = args.startDate;
-          if (args.endDate) fallbackFilters.endDate = args.endDate;
-          if (args.filterType && args.filterType !== "all") {
-            fallbackFilters.filterType = args.filterType === "complete" ? "finished" : "unfinished";
-          }
-
-          const fallbackJob = await client.startResponseExport(
-            args.surveyId,
-            "csv",
-            Object.keys(fallbackFilters).length > 0 ? fallbackFilters : undefined
-          );
-          const fallbackProgressId = fallbackJob.result.progressId;
-
-          let attempts = 0;
-          const maxAttempts = 30;
-
-          while (attempts < maxAttempts) {
-            await new Promise(resolve => setTimeout(resolve, 10000));
-            const progress = await client.getResponseExportProgress(args.surveyId, fallbackProgressId);
-
-            if (progress.result.percentComplete === 100) {
-              const fileData = await client.downloadResponseExportFile(args.surveyId, progress.result.fileId);
-              const saved = await saveExportToFile(fileData, args.surveyId, "csv", undefined, "filtered");
-
-              return toolSuccess({
-                status: "completed_via_fallback",
-                originalError: errorMessage,
-                format: "csv",
-                appliedFilters: fallbackFilters,
-                savedToFile: saved.filePath,
-                fileSize: saved.fileSizeBytes,
-                message: `Original filtered export failed, but CSV export with basic filters succeeded and was saved to: ${saved.filePath}`,
-                metadata: { fallbackProgressId, fileId: progress.result.fileId },
-              });
-            }
-            attempts++;
-          }
-
-          return toolSuccess({
-            status: "fallback_timeout",
-            originalError: errorMessage,
-            progressId: fallbackProgressId,
-            appliedFilters: fallbackFilters,
-            message: "Both original filtered export and CSV fallback are taking longer than expected. Use check_export_status to monitor the CSV export progress.",
-          });
-        } catch (fallbackError) {
-          const fallbackErrorMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-          return {
-            content: [{ type: "text" as const, text: `Error exporting filtered responses: ${errorMessage}. CSV fallback also failed: ${fallbackErrorMessage}. You may need to log into Qualtrics directly to export manually if the issue persists.` }],
-            isError: true,
-          };
-        }
+        return toolError(
+          `Error exporting filtered responses: ${errorMessage}. ` +
+          "The original export job was not silently retried; retry explicitly after addressing the error."
+        );
       }
     }
   );
@@ -378,29 +394,41 @@ export function registerResponseTools(
     })
   );
 
-  // Update response
+  // Update response embedded data through the current asynchronous batch API.
   server.registerTool(
     "update_response",
     {
-      description: "Update an existing survey response",
-      annotations: { destructiveHint: false, idempotentHint: true },
+      description: "Start a Qualtrics job to update embedded data on one existing survey response. The public API does not support rewriting recorded answer values through this operation; use create_response or response import for answer data.",
+      annotations: { destructiveHint: false },
       inputSchema: {
         surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
         responseId: z.string().min(1).describe("The response ID to update"),
-        values: z.record(z.any()).describe("Updated response values keyed by question ID"),
-        embeddedData: z.record(z.any()).optional().describe("Updated embedded data fields"),
+        embeddedData: z.record(z.string().max(1000)).refine(
+          (data) => Object.keys(data).length > 0,
+          "Provide at least one embedded-data field"
+        ).describe("Embedded-data fields to update; Qualtrics requires string values of at most 1000 characters"),
+        resetRecordedDate: z.boolean().optional().describe("Reset the response recorded date when the job runs (default: false)"),
       },
     },
     withErrorHandling("update_response", async (args) => {
-      const data: Record<string, any> = { values: args.values };
-      if (args.embeddedData) data.embeddedData = args.embeddedData;
-
-      const result = await responseApi.updateResponse(args.surveyId, args.responseId, data);
+      const result = await responseApi.updateResponseEmbeddedData(
+        args.surveyId,
+        args.responseId,
+        args.embeddedData,
+        args.resetRecordedDate ?? false
+      );
+      const progressId = result.result?.progressId;
       return toolSuccess({
-        success: true,
+        accepted: true,
         surveyId: args.surveyId,
         responseId: args.responseId,
-        message: "Response updated successfully",
+        progressId,
+        statusEndpoint: progressId
+          ? `/surveys/${args.surveyId}/update-responses/${progressId}`
+          : null,
+        message: progressId
+          ? "Embedded-data update job accepted. Poll statusEndpoint with qualtrics_api_request until the job completes."
+          : "Embedded-data update job accepted, but Qualtrics did not return a progressId.",
         details: result.result,
       });
     })

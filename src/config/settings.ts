@@ -10,9 +10,9 @@ const ConfigSchema = z.object({
     readOnly: z.boolean().default(true),
     rateLimiting: z.object({
       enabled: z.boolean().default(true),
-      requestsPerMinute: z.number().default(50),
+      requestsPerMinute: z.number().int().positive().default(50),
     }),
-    timeout: z.number().default(30000),
+    timeout: z.number().int().positive().default(30000),
   }),
 });
 
@@ -33,7 +33,7 @@ export async function loadConfig(): Promise<QualtricsConfig> {
   const config = {
     qualtrics: {
       apiToken: process.env.QUALTRICS_API_TOKEN,
-      dataCenter: process.env.QUALTRICS_DATA_CENTER || "yourdatacenterid",
+      dataCenter: process.env.QUALTRICS_DATA_CENTER,
       baseUrl: process.env.QUALTRICS_BASE_URL,
     },
     server: {
