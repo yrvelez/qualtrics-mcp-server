@@ -44,6 +44,8 @@ test("distribution and user pagination use only documented current query fields"
     pageSize: 25,
     skipToken: "next token",
   });
+  await distributions.getDistributionHistory("EMD_1", "SV_1");
+  await distributions.getDistributionHistory("EMD_1", "SV_1", "page 2");
   const users = new UserApi(fakeClient);
   await users.listUsers(20, "person@example.com");
 
@@ -51,11 +53,16 @@ test("distribution and user pagination use only documented current query fields"
     endpoints[0],
     "/distributions?surveyId=SV_1&useNewPaginationScheme=true&mailingListId=CG_1&distributionRequestType=Invite&pageSize=25&skipToken=next+token"
   );
+  assert.equal(endpoints[1], "/distributions/EMD_1/history?surveyId=SV_1");
   assert.equal(
-    endpoints[1],
+    endpoints[2],
+    "/distributions/EMD_1/history?surveyId=SV_1&skipToken=page+2"
+  );
+  assert.equal(
+    endpoints[3],
     "/users?offset=20&username=person%40example.com"
   );
-  assert.equal(endpoints[1].includes("limit="), false);
+  assert.equal(endpoints[3].includes("limit="), false);
   assert.equal(
     distributionNextSkipToken("?skipToken=page%2B2"),
     "page+2"

@@ -16,6 +16,37 @@ export function registerContactTools(
 ) {
   const contactApi = new ContactApi(client);
 
+  // List XM directories (pool-ID discovery)
+  server.registerTool(
+    "list_directories",
+    {
+      description: "List the XM Directories (contact pools) available to this account. Use this first to discover the directoryId (POOL_...) that every mailing-list and contact tool requires.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        pageSize: z.number().int().positive().max(100).optional().describe("Maximum directories on this page"),
+        skipToken: z.string().min(1).optional().describe("XM Directory pagination token from nextSkipToken"),
+      },
+    },
+    withErrorHandling("list_directories", async (args) => {
+      const result = await contactApi.listDirectories(args);
+      const directories = result.result?.elements || [];
+      const nextPage = result.result?.nextPage ?? null;
+
+      return toolSuccess({
+        directories: directories.map((d: any) => ({
+          directoryId: d.directoryId ?? d.id,
+          name: d.name,
+          contactCount: d.contactCount,
+          isDefault: d.isDefault,
+          deduplicationCriteria: d.deduplicationCriteria,
+        })),
+        returned: directories.length,
+        nextPage,
+        nextSkipToken: contactNextSkipToken(nextPage),
+      });
+    })
+  );
+
   // List mailing lists
   server.registerTool(
     "list_mailing_lists",

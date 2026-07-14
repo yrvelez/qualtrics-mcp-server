@@ -95,6 +95,34 @@ export function registerDistributionTools(
     })
   );
 
+  // Per-recipient delivery history
+  server.registerTool(
+    "get_distribution_history",
+    {
+      description: "Get per-recipient delivery history for an email distribution (sent, opened, bounced, blocked, responded), including the contactLookupId that ties each row back to a contact. This is the documented way to recover respondent identity for individual-link distributions after the fact.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        distributionId: z.string().min(1).describe("The distribution ID"),
+        surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
+        skipToken: z.string().min(1).optional().describe("Opaque token from the prior page's nextPage value"),
+      },
+    },
+    withErrorHandling("get_distribution_history", async (args) => {
+      const result = await distributionApi.getDistributionHistory(
+        args.distributionId,
+        args.surveyId,
+        args.skipToken
+      );
+      return toolSuccess({
+        distributionId: args.distributionId,
+        surveyId: args.surveyId,
+        history: result.result?.elements ?? result.result,
+        nextPage: result.result?.nextPage ?? null,
+        nextSkipToken: distributionNextSkipToken(result.result?.nextPage),
+      });
+    })
+  );
+
   // List generated individual links
   server.registerTool(
     "list_distribution_links",

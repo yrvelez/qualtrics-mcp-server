@@ -47,6 +47,18 @@ export class DistributionApi {
     );
   }
 
+  async getDistributionHistory(
+    distributionId: string,
+    surveyId: string,
+    skipToken?: string
+  ): Promise<any> {
+    const params = new URLSearchParams({ surveyId });
+    if (skipToken !== undefined) params.set("skipToken", skipToken);
+    return this.client.makeRequest(
+      `/distributions/${segment(distributionId)}/history?${params.toString()}`
+    );
+  }
+
   async createDistribution(data: Record<string, any>): Promise<any> {
     return this.client.makeRequest("/distributions", {
       method: "POST",

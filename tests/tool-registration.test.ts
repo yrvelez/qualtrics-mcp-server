@@ -4,7 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createQualtricsServer } from "../src/server.js";
 
-const EXPECTED_TOOL_COUNT = 110;
+const EXPECTED_TOOL_COUNT = 112;
 
 test("server registers the complete unique tool catalog with serializable schemas", async () => {
   const originalEnv = {
@@ -59,6 +59,8 @@ test("server registers the complete unique tool catalog with serializable schema
       "validate_survey_design",
       "update_mailing_list",
       "get_contact",
+      "list_directories",
+      "get_distribution_history",
     ]) {
       assert.ok(names.includes(name), `expected newly supported tool ${name}`);
     }

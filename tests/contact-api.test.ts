@@ -20,6 +20,21 @@ function capturingClient(calls: CapturedCall[]): QualtricsClient {
   } as unknown as QualtricsClient;
 }
 
+test("directory discovery lists pools with optional cursor pagination", async () => {
+  const calls: CapturedCall[] = [];
+  const api = new ContactApi(capturingClient(calls));
+
+  await api.listDirectories();
+  await api.listDirectories({ pageSize: 100, skipToken: "next+token" });
+
+  assert.equal(calls[0].endpoint, "/directories");
+  assert.equal(
+    calls[1].endpoint,
+    "/directories?pageSize=100&skipToken=next%2Btoken"
+  );
+  assert.equal(calls[0].options.method, undefined);
+});
+
 test("XM Directory mailing-list routes use current cursor pagination and CRUD contracts", async () => {
   const calls: CapturedCall[] = [];
   const api = new ContactApi(capturingClient(calls));
