@@ -1,8 +1,8 @@
 # Qualtrics MCP Server
 
-An MCP server for end-to-end Qualtrics questionnaire programming and operations. Its 110 tools let any MCP client build complex surveys, edit nested flow logic, manage options, quotas, translations, versions, contacts, distributions, libraries, webhooks, and responses without importing this repository's TypeScript services.
+An MCP server for end-to-end Qualtrics questionnaire programming and operations. Its 112 tools let any MCP client build complex surveys, edit nested flow logic, manage options, quotas, translations, versions, contacts, distributions, libraries, webhooks, and responses without importing this repository's TypeScript services.
 
-The server has 108 Qualtrics action tools across 14 API areas, plus 2 server-permission controls. It provides a comprehensive survey-programming surface and a guarded JSON API v3 escape hatch; it does not claim that every licensed Qualtrics enterprise product has a dedicated wrapper.
+The server has 110 Qualtrics action tools across 14 API areas, plus 2 server-permission controls. It provides a comprehensive survey-programming surface and a guarded JSON API v3 escape hatch; it does not claim that every licensed Qualtrics enterprise product has a dedicated wrapper.
 
 ## Tool coverage
 
@@ -15,15 +15,15 @@ The server has 108 Qualtrics action tools across 14 API areas, plus 2 server-per
 | Survey flow | 12 | Full-tree get/replace, insert/update/move/delete nested elements, validation, embedded data, web services, piped text |
 | Quotas | 10 | CRUD for quotas and quota groups |
 | Responses | 8 | Streamed full/filtered export, export status/download, individual response create/get/delete, queued embedded-data update |
-| Contacts | 11 | Current XM Directory mailing-list and contact CRUD, cursor pagination, bounded sequential bulk import |
-| Distributions | 8 | Distribution listing/details/links, anonymous links, invitations, reminders, thank-yous, deletion |
+| Contacts | 12 | Directory (pool-ID) discovery, current XM Directory mailing-list and contact CRUD, cursor pagination, bounded sequential bulk import |
+| Distributions | 9 | Distribution listing/details/links, per-recipient delivery history, anonymous links, invitations, reminders, thank-yous, deletion |
 | Libraries | 11 | Libraries, reusable survey assets and multilingual messages, graphic upload/delete |
 | Survey import and copy | 5 | Survey copy plus QSF, TXT, URL, and base64 DOCX imports |
 | Webhooks | 3 | Event-subscription list, create, delete |
 | Users | 2 | List users and get user details |
 | Advanced API | 1 | Guarded JSON requests to other Qualtrics API v3 endpoints |
 | Server control | 2 | Least-privilege write scopes and read-only toggle |
-| **Total** | **110** | **108 Qualtrics actions + 2 server controls** |
+| **Total** | **112** | **110 Qualtrics actions + 2 server controls** |
 
 See [docs/API_COVERAGE.md](docs/API_COVERAGE.md) for the exact tool inventory, scope mapping, and boundaries.
 
@@ -67,11 +67,12 @@ pnpm example:motivated-reasoning
 
 ### Contacts and response data
 
-- All contact tools use the current XM Directory API and require a licensed directory ID (`directoryId`, usually `POOL_...`). Discover directories with `qualtrics_api_request` using `GET /directories` if you do not already know the ID.
+- All contact tools use the current XM Directory API and require a licensed directory ID (`directoryId`, usually `POOL_...`). Use `list_directories` to discover the available directory IDs if you do not already know one.
 - Mailing-list pages accept up to 100 results and contact pages up to 50. Continue with the returned `nextSkipToken`; `includeCount` is approximate and can be slower on large lists.
 - `remove_contact` removes membership from the selected mailing list only; it does not delete the person from the directory. Qualtrics does not support `get_mailing_list` or `delete_mailing_list` on shared mailing lists.
 - Contact identity rules vary by directory configuration; create tools accept email, first/last name, or `externalDataReference` and let Qualtrics apply the brand's exact matching requirements.
 - `bulk_import_contacts` is a bounded, sequential, non-atomic helper and reports per-input failures. It does not hide partial success.
+- `get_distribution_history` returns per-recipient delivery state (sent, opened, bounced, responded) with the `contactLookupId` that ties responses from individual-link distributions back to contacts.
 - Response downloads buffer only small results; large bodies stream to a collision-safe file in Downloads. A slow healthy transfer can exceed `REQUEST_TIMEOUT` overall because the download timeout is applied to headers and each inactive read, not total duration.
 
 ### Advanced JSON API access
@@ -146,9 +147,10 @@ pnpm build
 {
   "mcpServers": {
     "qualtrics": {
-      "command": "node",
+      "command": "/opt/homebrew/bin/node",
       "args": ["/absolute/path/to/qualtrics_mcp/build/index.js"],
       "env": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         "QUALTRICS_API_TOKEN": "your_api_token",
         "QUALTRICS_DATA_CENTER": "your_data_center_id"
       }
@@ -157,10 +159,21 @@ pnpm build
 }
 ```
 
+Use the absolute path that `which node` prints on your machine as `command` (shown above: Homebrew on Apple Silicon; Intel Homebrew installs to `/usr/local/bin/node`, and nvm installs under `~/.nvm/versions/node/.../bin/node`).
+
+#### macOS troubleshooting: server never appears, no error in the UI
+
+GUI-launched MCP clients such as Claude Desktop spawn servers with a minimal `PATH` that excludes Homebrew and nvm directories, and the resulting failure is silent. Two layers break:
+
+1. A bare `"command"` of `node` or `npx` is not found at all.
+2. Even with an absolute `npx`/`tsx` path, the script's `#!/usr/bin/env node` shebang still cannot resolve `node` (`env: node: No such file or directory`).
+
+The config above fixes both: an absolute `command` path handles the first layer, and the `PATH` entry in `env` handles shebang resolution. You can reproduce the failure outside the client by piping an `initialize` JSON-RPC request to the configured command with a stripped `PATH`.
+
 ## Qualtrics design conventions
 
 - Set an explicit, stable `DataExportTag` on every data-collecting question. The creation tools derive a readable fallback when omitted, but explicit study-specific names keep exports and pre/post measures unambiguous.
-- For Matrix questions, `Choices` are rows/statements and `Answers` are columns/scale points. `add_matrix_question` supplies the Qualtrics boilerplate and validates selector/sub-selector pairs.
+- For Matrix questions, `Choices` are rows/statements and `Answers` are columns/scale points. `add_matrix_question` supplies the Qualtrics boilerplate and validates selector/sub-selector pairs. Statement objects with `textEntry: true` add an inline text box to individual rows (e.g., "Other (please specify)").
 - In TypeScript template literals, escape the dollar sign in Qualtrics piped text as `\${...}` when it must remain literal at runtime.
 - Every raw flow element needs a unique `FlowID`; `Properties.Count` must equal the highest numeric ID. The incremental flow tools manage both automatically.
 - Declare embedded-data fields near the beginning of the flow, then assign their values after the question or web service that produces them.

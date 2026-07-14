@@ -1,6 +1,6 @@
 # Qualtrics MCP Server
 
-An MCP server providing 110 tools: 108 Qualtrics actions across 14 API areas plus 2 server controls. It is a comprehensive survey-programming surface with a guarded JSON API v3 escape hatch; do not describe it as a dedicated wrapper for every licensed Qualtrics enterprise endpoint.
+An MCP server providing 112 tools: 110 Qualtrics actions across 14 API areas plus 2 server controls. It is a comprehensive survey-programming surface with a guarded JSON API v3 escape hatch; do not describe it as a dedicated wrapper for every licensed Qualtrics enterprise endpoint.
 
 ## Example Reference
 
@@ -24,6 +24,7 @@ See `examples/motivated-reasoning-study.ts` for a complete MCP-only example of b
 ## Matrix Questions
 
 - Use `add_matrix_question` for matrix/Likert grids. **`Choices` = rows/statements, `Answers` = columns/scale points** — both required, keyed by numeric strings (`"1"`, `"2"`, ...).
+- Row-level inline text entry (an "Other (please specify)" row): pass a statement object `{ text, textEntry: true, textEntrySize? }` to `add_matrix_question`, or set `TextEntry: "true"` (and optionally `TextEntrySize`) on a choice via `update_question` — extra per-choice fields pass through.
 - Valid Selector → SubSelector pairs: `Likert` → `SingleAnswer`/`MultipleAnswer`/`DL`; `RO` → `DND`/`TX`; `TE` → `Short`/`Medium`/`Long`/`Essay`; `CS` → `WOTB`/`WTB`; `Bipolar`/`MaxDiff` → `SingleAnswer`. Mismatches cause opaque 400s.
 - The Matrix create schema also requires `ChoiceDataExportTags`, `DefaultChoices`, `Configuration`, `QuestionDescription`, `Language`, and `Validation` — the tools fill these defaults automatically.
 - In the New Survey Taking Experience (formerly Simple Layout), use Rank Order `DND` and Constant Sum `VRTL`. Rank Order `SB`/`TX` and Constant Sum `HBAR`/`HSLIDER` are legacy-experience variations.
@@ -42,7 +43,7 @@ See `examples/motivated-reasoning-study.ts` for a complete MCP-only example of b
 - The server starts read-only unless `QUALTRICS_READ_ONLY=false`. Prefer `set_write_scopes` and grant only the required scopes.
 - Use dedicated tools when available. `qualtrics_api_request` is the guarded fallback for authorized JSON API v3 endpoints; known routes keep their normal scope, and otherwise-unmapped writes require `advanced`.
 - Use dedicated import tools for multipart QSF/TXT/DOCX content and response tools for export downloads.
-- Run `validate_survey_design` before versioning or activation. See `docs/API_COVERAGE.md` for the exact 110-tool inventory and limitations.
+- Run `validate_survey_design` before versioning or activation. See `docs/API_COVERAGE.md` for the exact 112-tool inventory and limitations.
 
 ## Secrets
 
