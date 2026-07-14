@@ -124,3 +124,44 @@ test("raw question templates cannot override explicit fields and auto tags avoid
     assert.equal(jsonBody(updateCall).QuestionJS, "safeJs();");
   });
 });
+
+test("matrix rows accept per-statement inline text entry", async () => {
+  await withQuestionTools(async (client, calls) => {
+    const result = await client.callTool({
+      name: "add_matrix_question",
+      arguments: {
+        surveyId: "SV_1",
+        blockId: "BL_1",
+        questionText: "Rate each source",
+        dataExportTag: "SourceRatings",
+        statements: [
+          "Newspapers",
+          { text: "Television" },
+          { text: "Other (please specify)", textEntry: true, textEntrySize: "Medium" },
+        ],
+        scalePoints: ["Never", "Sometimes", "Often"],
+      },
+    });
+    assert.notEqual(result.isError, true);
+
+    const createCall = calls.find((call) => call.options.method === "POST");
+    assert.ok(createCall);
+    const body = jsonBody(createCall);
+    assert.equal(body.QuestionType, "Matrix");
+    assert.deepEqual(body.Choices, {
+      "1": { Display: "Newspapers" },
+      "2": { Display: "Television" },
+      "3": {
+        Display: "Other (please specify)",
+        TextEntry: "true",
+        TextEntrySize: "Medium",
+      },
+    });
+    assert.deepEqual(body.ChoiceOrder, ["1", "2", "3"]);
+    assert.deepEqual(body.Answers, {
+      "1": { Display: "Never" },
+      "2": { Display: "Sometimes" },
+      "3": { Display: "Often" },
+    });
+  });
+});

@@ -8,6 +8,11 @@ export interface MailingListPageOptions {
   includeCount?: boolean;
 }
 
+export interface DirectoryPageOptions {
+  pageSize?: number;
+  skipToken?: string;
+}
+
 export interface ContactPageOptions {
   directoryId: string;
   pageSize?: number;
@@ -40,6 +45,14 @@ export function contactNextSkipToken(nextPage: unknown): string | null {
 
 export class ContactApi {
   constructor(private client: QualtricsClient) {}
+
+  async listDirectories(options: DirectoryPageOptions = {}): Promise<any> {
+    const query = queryString({
+      pageSize: options.pageSize,
+      skipToken: options.skipToken,
+    });
+    return this.client.makeRequest(`/directories${query}`);
+  }
 
   async listMailingLists(options: MailingListPageOptions): Promise<any> {
     const query = queryString({

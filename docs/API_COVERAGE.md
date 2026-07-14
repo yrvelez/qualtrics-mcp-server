@@ -1,6 +1,6 @@
 # API coverage
 
-This document describes the tools currently registered by the server. The exact total is **110**: **108 Qualtrics action tools across 14 API areas** and **2 server controls**.
+This document describes the tools currently registered by the server. The exact total is **112**: **110 Qualtrics action tools across 14 API areas** and **2 server controls**.
 
 “Comprehensive survey programming” means an MCP client can create, structure, validate, configure, version, distribute, and retrieve data from complex questionnaires without importing the internal TypeScript client. It does not mean every API for every licensed Qualtrics XM product has a dedicated semantic wrapper.
 
@@ -107,8 +107,9 @@ Deleting a quota group is a documented cascade that also deletes every quota in 
 
 Response export initiation is treated as a read operation even though Qualtrics uses `POST`. Large exports stream to a collision-safe filename in the user's fixed Downloads directory without retaining an unbounded body in memory; callers cannot select an arbitrary filesystem path or overwrite an existing file. Download timeouts apply to headers and each inactive chunk read rather than total transfer duration. Errors never silently launch a second fallback export. `update_response` uses Qualtrics's current asynchronous update job to change embedded data on one response and returns a progress endpoint; it does not claim to rewrite recorded answer values.
 
-### Contacts (11)
+### Contacts (12)
 
+- `list_directories`
 - `list_mailing_lists`
 - `get_mailing_list`
 - `update_mailing_list`
@@ -121,14 +122,15 @@ Response export initiation is treated as a read operation even though Qualtrics 
 - `remove_contact`
 - `bulk_import_contacts`
 
-Every contact tool uses the current XM Directory routes and requires `directoryId` (normally `POOL_...`); the retired legacy `/mailinglists` routes are not used. A caller can discover the directory ID through `qualtrics_api_request` with `GET /directories`. Mailing-list pages accept up to 100 records and contact pages up to 50; callers continue with `nextSkipToken`. `includeCount` is approximate and may reduce performance on large lists. `get_mailing_list` and `delete_mailing_list` do not support shared mailing lists. `remove_contact` removes only mailing-list membership, not the directory contact. Contact identity requirements vary by directory configuration, so creation accepts email, first/last name, or external data reference and leaves the exact matching rule to Qualtrics.
+Every contact tool uses the current XM Directory routes and requires `directoryId` (normally `POOL_...`); the retired legacy `/mailinglists` routes are not used. `list_directories` discovers the available directory IDs (and marks the account default), so callers no longer need the raw-API escape hatch for this. Mailing-list pages accept up to 100 records and contact pages up to 50; callers continue with `nextSkipToken`. `includeCount` is approximate and may reduce performance on large lists. `get_mailing_list` and `delete_mailing_list` do not support shared mailing lists. `remove_contact` removes only mailing-list membership, not the directory contact. Contact identity requirements vary by directory configuration, so creation accepts email, first/last name, or external data reference and leaves the exact matching rule to Qualtrics.
 
 The bulk helper is intentionally bounded to 100 contacts and calls the documented single-contact endpoint sequentially. It returns per-contact outcomes and is not atomic, so an error can leave earlier contacts created.
 
-### Distributions (8)
+### Distributions (9)
 
 - `list_distributions`
 - `get_distribution`
+- `get_distribution_history`
 - `list_distribution_links`
 - `create_anonymous_link`
 - `create_email_distribution`
@@ -136,6 +138,7 @@ The bulk helper is intentionally bounded to 100 contacts and calls the documente
 - `create_reminder`
 - `create_thank_you`
 
+`get_distribution_history` returns per-recipient delivery state (sent, opened, bounced, blocked, responded) with the `contactLookupId` linking each row back to a contact; it is a plain read and works in read-only mode.
 Qualtrics documents that retrieving generated individual links can update contact-frequency state and reset email-status dates for some distribution types. Consequently, `list_distribution_links` is annotated as side-effecting and requires the `distributions` scope despite using `GET`.
 `create_anonymous_link` is a read-only name retained for compatibility: it reads `BrandBaseURL` from the survey definition and constructs the canonical `/jfe/form/{surveyId}` URL without creating a distribution.
 
@@ -187,7 +190,7 @@ This guarded escape hatch supports `GET`, `POST`, `PUT`, `PATCH`, and confirmed 
 - `set_write_scopes`
 - `set_read_only_mode`
 
-These are local MCP controls and do not call Qualtrics. They account for the difference between the 108 Qualtrics action tools and the 110 total tools.
+These are local MCP controls and do not call Qualtrics. They account for the difference between the 110 Qualtrics action tools and the 112 total tools.
 
 ## Write-scope routing
 

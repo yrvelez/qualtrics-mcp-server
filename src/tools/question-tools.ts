@@ -305,7 +305,7 @@ export function registerQuestionTools(
         questionText: z.string().optional().describe("New question text"),
         choices: z.record(z.object({
           Display: z.string(),
-        }).passthrough()).optional().describe("Updated choice definitions (rows/statements for Matrix)"),
+        }).passthrough()).optional().describe("Updated choice definitions (rows/statements for Matrix). Extra per-choice Qualtrics fields pass through unchanged, e.g. TextEntry: \"true\" and TextEntrySize for an inline text box on a row"),
         choiceOrder: z.array(z.string()).optional().describe("Updated display order of choice keys (derived from choices if those change and this is omitted)"),
         answers: z.record(z.object({
           Display: z.string(),
@@ -643,13 +643,20 @@ export function registerQuestionTools(
     "add_matrix_question",
     {
       description:
-        "Simplified helper to create a matrix question. Choices = rows/statements, Answers = columns/scale points. Defaults to a Likert single-answer matrix; use selector/subSelector for variants (e.g., selector 'CS' + subSelector 'WOTB' for matrix constant sum).",
+        "Simplified helper to create a matrix question. Choices = rows/statements, Answers = columns/scale points. Defaults to a Likert single-answer matrix; use selector/subSelector for variants (e.g., selector 'CS' + subSelector 'WOTB' for matrix constant sum). Statements may be objects to enable an inline text-entry box on individual rows (e.g., an 'Other (please specify)' row).",
       annotations: { destructiveHint: false },
       inputSchema: {
         surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
         blockId: z.string().min(1).describe("The block ID to add the question to"),
         questionText: z.string().min(1).describe("The question text/instructions"),
-        statements: z.array(z.string()).min(1).describe("Array of statement/row labels"),
+        statements: z.array(z.union([
+          z.string(),
+          z.object({
+            text: z.string().min(1).describe("Statement/row label"),
+            textEntry: z.boolean().optional().describe("Add an inline text-entry box to this row (e.g., for 'Other (please specify)')"),
+            textEntrySize: z.enum(["Small", "Medium", "Large"]).optional().describe("Inline text box size; only meaningful with textEntry: true"),
+          }),
+        ])).min(1).describe("Array of statement/row labels; pass an object instead of a string to enable per-row inline text entry"),
         scalePoints: z.array(z.string()).min(2).describe("Array of scale point labels (e.g., ['Strongly Disagree', ..., 'Strongly Agree'])"),
         forceResponse: z.boolean().optional().describe("Require a response for all statements (default: false)"),
         selector: z.enum(["Likert", "Bipolar", "RO", "CS", "TE", "Profile", "MaxDiff"]).optional().describe("Matrix selector (default: Likert)"),
@@ -671,6 +678,23 @@ export function registerQuestionTools(
         );
       }
 
+      const choices: Record<string, Record<string, string>> = {};
+      args.statements.forEach(
+        (statement: string | { text: string; textEntry?: boolean; textEntrySize?: string }, index: number) => {
+          const key = String(index + 1);
+          if (typeof statement === "string") {
+            choices[key] = { Display: statement };
+            return;
+          }
+          choices[key] = { Display: statement.text };
+          if (statement.textEntry) {
+            // Qualtrics stores row-level text entry as string flags on the choice.
+            choices[key].TextEntry = "true";
+            if (statement.textEntrySize) choices[key].TextEntrySize = statement.textEntrySize;
+          }
+        }
+      );
+
       const questionData: Record<string, any> = {
         QuestionText: args.questionText,
         QuestionDescription: toQuestionDescription(args.questionText),
@@ -678,7 +702,7 @@ export function registerQuestionTools(
         Selector: selector,
         SubSelector: subSelector,
         DataExportTag: args.dataExportTag ?? await nextExportTag(surveyApi, args.surveyId, args.questionText),
-        Choices: buildDisplayMap(args.statements),
+        Choices: choices,
         ChoiceOrder: orderKeys(args.statements.length),
         Answers: buildDisplayMap(args.scalePoints),
         AnswerOrder: orderKeys(args.scalePoints.length),
