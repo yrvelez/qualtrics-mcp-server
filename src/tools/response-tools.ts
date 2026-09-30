@@ -4,7 +4,7 @@ import { QualtricsClient } from "../services/qualtrics-client.js";
 import { ResponseApi } from "../services/response-api.js";
 import { QualtricsConfig } from "../config/settings.js";
 import { toolError, toolSuccess, withErrorHandling, requireDeleteConfirmation } from "./_helpers.js";
-import { consumeExportDownload } from "../utils/file-save.js";
+import { consumeExportDownload, saveBinaryDownload } from "../utils/file-save.js";
 
 export function exportJobState(result: any): {
   status: string;
@@ -30,6 +30,36 @@ export function registerResponseTools(
   config: QualtricsConfig
 ) {
   const responseApi = new ResponseApi(client);
+
+  server.registerTool(
+    "download_uploaded_file",
+    {
+      description:
+        "Download a file submitted to a File Upload question byte-for-byte (PDF, DOCX, images, or other files). Find responseId and the QIDn_FILE_ID value in exported responses. Always saves to the server's Downloads folder; never returns binary data as text. Works in Qualtrics read-only mode, but creates a local file.",
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: {
+        surveyId: z.string().min(1).describe("The Qualtrics survey ID"),
+        responseId: z.string().min(1).describe("The response ID (e.g., R_123456789)"),
+        fileId: z.string().min(1).describe("The uploaded file ID from the response's QIDn_FILE_ID value"),
+        saveToFile: z.string().trim().min(1).describe("Filename only in the Downloads folder, including the original extension (e.g., 'submission.pdf'). Existing files are never overwritten. Names without an extension get .bin."),
+      },
+    },
+    withErrorHandling("download_uploaded_file", async (args) => {
+      const downloaded = await saveBinaryDownload(
+        client.downloadUploadedFileChunks(args.surveyId, args.responseId, args.fileId),
+        args.saveToFile
+      );
+      return toolSuccess({
+        status: "completed",
+        surveyId: args.surveyId,
+        responseId: args.responseId,
+        fileId: args.fileId,
+        savedToFile: downloaded.savedToFile,
+        fileSize: downloaded.fileSizeBytes,
+        fileSizeMB: downloaded.fileSizeMB,
+      });
+    })
+  );
 
   // Export responses tool
   server.registerTool(
