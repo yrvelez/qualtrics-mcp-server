@@ -1,6 +1,6 @@
 # API coverage
 
-This document describes the tools currently registered by the server. The exact total is **112**: **110 Qualtrics action tools across 14 API areas** and **2 server controls**.
+This document describes the tools currently registered by the server. The exact total is **113**: **111 Qualtrics action tools across 14 API areas** and **2 server controls**.
 
 “Comprehensive survey programming” means an MCP client can create, structure, validate, configure, version, distribute, and retrieve data from complex questionnaires without importing the internal TypeScript client. It does not mean every API for every licensed Qualtrics XM product has a dedicated semantic wrapper.
 
@@ -94,11 +94,12 @@ The element tools traverse nested flow trees, allocate collision-free IDs, and n
 Quota payload tools expose raw criteria and action structures so advanced quota logic is not limited to a simplified schema.
 Deleting a quota group is a documented cascade that also deletes every quota in the group, so `delete_quota_group` requires both deletion confirmation and explicit cascade acknowledgement.
 
-### Responses (8)
+### Responses (9)
 
 - `export_responses`
 - `check_export_status`
 - `download_export_file`
+- `download_uploaded_file`
 - `export_responses_filtered`
 - `get_response`
 - `create_response`
@@ -106,6 +107,8 @@ Deleting a quota group is a documented cascade that also deletes every quota in 
 - `delete_response`
 
 Response export initiation is treated as a read operation even though Qualtrics uses `POST`. Large exports stream to a collision-safe filename in the user's fixed Downloads directory without retaining an unbounded body in memory; callers cannot select an arbitrary filesystem path or overwrite an existing file. Download timeouts apply to headers and each inactive chunk read rather than total transfer duration. Errors never silently launch a second fallback export. `update_response` uses Qualtrics's current asynchronous update job to change embedded data on one response and returns a progress endpoint; it does not claim to rewrite recorded answer values.
+
+`download_uploaded_file` implements [Retrieve a User-Uploaded File](https://www.postman.com/qualtrics-public-apis/qualtrics-public-workspace/request/qpaali6/retrieve-a-user-uploaded-file): `GET /surveys/{surveyId}/responses/{responseId}/uploaded-files/{fileId}`. It requires a filename (`saveToFile`), always streams bytes to Downloads without text decoding, and returns the saved path and size. Use the response ID and `QIDn_FILE_ID` from an export. This Qualtrics read operation requires no write scope, but is annotated as non-read-only because it creates a local file. Filename restrictions, exclusive creation, interrupted-file cleanup, and inactivity timeouts match response exports.
 
 ### Contacts (12)
 
@@ -185,12 +188,14 @@ Local QSF, TXT, and DOCX content uses multipart form data without forcing a JSON
 
 This guarded escape hatch supports `GET`, `POST`, `PUT`, `PATCH`, and confirmed `DELETE` for JSON API v3 resources. It pins requests to the configured Qualtrics origin, encodes query parameters separately, and rejects paths that could change or escape the API base. Known route families retain their mapped least-privilege scope; writes to otherwise-unmapped endpoints require `advanced`.
 
+Binary content types and uploaded-file GET responses are rejected with guidance to use dedicated download tools. JSON and supported text responses use strict UTF-8 decoding so malformed bytes cannot silently become replacement characters.
+
 ### Server control (2)
 
 - `set_write_scopes`
 - `set_read_only_mode`
 
-These are local MCP controls and do not call Qualtrics. They account for the difference between the 110 Qualtrics action tools and the 112 total tools.
+These are local MCP controls and do not call Qualtrics. They account for the difference between the 111 Qualtrics action tools and the 113 total tools.
 
 ## Write-scope routing
 
@@ -225,7 +230,7 @@ The MCP-only example in `examples/motivated-reasoning-study.ts` exercises these 
 
 - The server does not have a dedicated semantic tool for every product-specific Qualtrics endpoint, such as every directory, ticketing, workflow, or licensed XM product resource.
 - `qualtrics_api_request` is a JSON API v3 mechanism, not an arbitrary HTTP client. It cannot target another origin, and it is not the multipart or binary path.
-- Multipart survey import and response export/download use dedicated tools. Other binary endpoints may require a future dedicated implementation.
+- Multipart survey import, response export/download, and respondent uploaded-file download use dedicated tools. Other binary endpoints may require a future dedicated implementation.
 - APIs, fields, language translation, and product areas remain subject to the configured brand's license and the token's Qualtrics permissions.
 - Private, UI-only, undocumented, or deprecated endpoints are not promised by this project.
 - When a survey feature lacks an individual public mutation endpoint, copying or importing a known-good template is preferred. This is especially useful for scoring and specialized presentation behavior.

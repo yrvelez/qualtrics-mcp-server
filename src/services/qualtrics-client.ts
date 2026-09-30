@@ -231,10 +231,41 @@ export class QualtricsClient {
 
       if (response.status === 204) return undefined as T;
 
-      const responseText = await response.text();
+      const contentType = (response.headers.get("content-type") ?? "")
+        .split(";", 1)[0].trim().toLowerCase();
+      const isJson = contentType === "application/json" ||
+        contentType === "text/json" || contentType.endsWith("+json");
+      const isText = contentType.startsWith("text/") ||
+        contentType === "application/xml" || contentType.endsWith("+xml") ||
+        contentType === "application/javascript" ||
+        contentType === "application/x-www-form-urlencoded";
+      // Never decode file downloads as text, even if their MIME type is
+      // missing or misleading. Other non-text media types must also use a
+      // byte-preserving download path instead of Response.text().
+      const isUploadedFile = method === "GET" &&
+        /^\/surveys\/[^/]+\/responses\/[^/]+\/uploaded-files\/[^/]+$/.test(pathname);
+      if (isUploadedFile || (contentType && !isJson && !isText)) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error(
+          `Binary response (${contentType || "unknown content type"}) cannot be returned as text without risking file corruption. ` +
+          "Use download_uploaded_file for respondent uploads or download_export_file for response exports."
+        );
+      }
+
+      // A missing/mislabelled Content-Type must not turn malformed UTF-8 into
+      // replacement characters. Fatal decoding fails clearly instead.
+      const responseBytes = await response.arrayBuffer();
+      let responseText: string;
+      try {
+        responseText = new TextDecoder("utf-8", { fatal: true }).decode(responseBytes);
+      } catch {
+        throw new Error(
+          "Response is not valid UTF-8 and may contain binary data. " +
+          "Use download_uploaded_file for respondent uploads or download_export_file for response exports."
+        );
+      }
       if (!responseText) return undefined as T;
-      const contentType = response.headers.get("content-type") ?? "";
-      if (contentType.includes("json")) {
+      if (isJson) {
         return JSON.parse(responseText) as T;
       }
       return responseText as T;
@@ -319,6 +350,26 @@ export class QualtricsClient {
     const endpoint =
       `/surveys/${encodeURIComponent(surveyId)}/export-responses/` +
       `${encodeURIComponent(fileId)}/file`;
+    yield* this.downloadFileChunks(endpoint, "Response export");
+  }
+
+  /** Download an answer to a File Upload question without decoding its bytes. */
+  async *downloadUploadedFileChunks(
+    surveyId: string,
+    responseId: string,
+    fileId: string
+  ): AsyncGenerator<Uint8Array> {
+    const endpoint =
+      `/surveys/${encodeURIComponent(surveyId)}/responses/` +
+      `${encodeURIComponent(responseId)}/uploaded-files/${encodeURIComponent(fileId)}`;
+    yield* this.downloadFileChunks(endpoint, "Uploaded file", "*/*");
+  }
+
+  private async *downloadFileChunks(
+    endpoint: string,
+    description: string,
+    accept = "application/octet-stream"
+  ): AsyncGenerator<Uint8Array> {
     checkedEndpointPathname(endpoint);
     await this.rateLimiter.checkLimit();
 
@@ -342,7 +393,7 @@ export class QualtricsClient {
       const response = await fetch(`${this.baseUrl}${endpoint}`, {
         headers: {
           "X-API-TOKEN": this.apiToken,
-          Accept: "application/octet-stream",
+          Accept: accept,
         },
         signal: controller.signal,
       });
@@ -353,7 +404,7 @@ export class QualtricsClient {
         );
       }
       if (!response.body) {
-        throw new Error("Qualtrics response export download returned no body.");
+        throw new Error(`Qualtrics ${description.toLowerCase()} download returned no body.`);
       }
 
       clearInactivityTimeout();
@@ -378,7 +429,7 @@ export class QualtricsClient {
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw new Error(
-          "Response export download timed out waiting for headers or the next data chunk."
+          `${description} download timed out waiting for headers or the next data chunk.`
         );
       }
       throw error;

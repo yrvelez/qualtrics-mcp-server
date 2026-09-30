@@ -60,7 +60,7 @@ export function registerApiTools(server: McpServer, client: QualtricsClient) {
     "qualtrics_api_request",
     {
       description:
-        "Advanced escape hatch for any Qualtrics API v3 endpoint not covered by a dedicated tool. Requests stay on the configured Qualtrics origin. GET is available in read-only mode; otherwise-unmapped writes require the HIGH-risk 'advanced' write scope. Known endpoints still require their normal least-privilege scope. Prefer dedicated tools when available because they validate payloads and provide safer defaults.",
+        "Advanced escape hatch for Qualtrics API v3 JSON/text endpoints not covered by a dedicated tool. Binary responses are rejected to prevent file corruption; use download_uploaded_file for respondent uploads or download_export_file for exports. Requests stay on the configured Qualtrics origin. GET is available in read-only mode; otherwise-unmapped writes require the HIGH-risk 'advanced' write scope. Known endpoints still require their normal least-privilege scope. Prefer dedicated tools when available because they validate payloads and provide safer defaults.",
       annotations: { destructiveHint: true },
       inputSchema: {
         method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).describe("HTTP method"),

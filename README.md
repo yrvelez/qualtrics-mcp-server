@@ -1,8 +1,8 @@
 # Qualtrics MCP Server
 
-An MCP server for end-to-end Qualtrics questionnaire programming and operations. Its 112 tools let any MCP client build complex surveys, edit nested flow logic, manage options, quotas, translations, versions, contacts, distributions, libraries, webhooks, and responses without importing this repository's TypeScript services.
+An MCP server for end-to-end Qualtrics questionnaire programming and operations. Its 113 tools let any MCP client build complex surveys, edit nested flow logic, manage options, quotas, translations, versions, contacts, distributions, libraries, webhooks, and responses without importing this repository's TypeScript services.
 
-The server has 110 Qualtrics action tools across 14 API areas, plus 2 server-permission controls. It provides a comprehensive survey-programming surface and a guarded JSON API v3 escape hatch; it does not claim that every licensed Qualtrics enterprise product has a dedicated wrapper.
+The server has 111 Qualtrics action tools across 14 API areas, plus 2 server-permission controls. It provides a comprehensive survey-programming surface and a guarded JSON API v3 escape hatch; it does not claim that every licensed Qualtrics enterprise product has a dedicated wrapper.
 
 ## Tool coverage
 
@@ -14,7 +14,7 @@ The server has 110 Qualtrics action tools across 14 API areas, plus 2 server-per
 | Blocks | 5 | List, get, create, safely update full definitions, delete |
 | Survey flow | 12 | Full-tree get/replace, insert/update/move/delete nested elements, validation, embedded data, web services, piped text |
 | Quotas | 10 | CRUD for quotas and quota groups |
-| Responses | 8 | Streamed full/filtered export, export status/download, individual response create/get/delete, queued embedded-data update |
+| Responses | 9 | Streamed full/filtered export, export status/download, uploaded-file download, individual response create/get/delete, queued embedded-data update |
 | Contacts | 12 | Directory (pool-ID) discovery, current XM Directory mailing-list and contact CRUD, cursor pagination, bounded sequential bulk import |
 | Distributions | 9 | Distribution listing/details/links, per-recipient delivery history, anonymous links, invitations, reminders, thank-yous, deletion |
 | Libraries | 11 | Libraries, reusable survey assets and multilingual messages, graphic upload/delete |
@@ -23,7 +23,7 @@ The server has 110 Qualtrics action tools across 14 API areas, plus 2 server-per
 | Users | 2 | List users and get user details |
 | Advanced API | 1 | Guarded JSON requests to other Qualtrics API v3 endpoints |
 | Server control | 2 | Least-privilege write scopes and read-only toggle |
-| **Total** | **112** | **110 Qualtrics actions + 2 server controls** |
+| **Total** | **113** | **111 Qualtrics actions + 2 server controls** |
 
 See [docs/API_COVERAGE.md](docs/API_COVERAGE.md) for the exact tool inventory, scope mapping, and boundaries.
 
@@ -75,6 +75,23 @@ pnpm example:motivated-reasoning
 - `get_distribution_history` returns per-recipient delivery state (sent, opened, bounced, responded) with the `contactLookupId` that ties responses from individual-link distributions back to contacts.
 - Response downloads buffer only small results; large bodies stream to a collision-safe file in Downloads. A slow healthy transfer can exceed `REQUEST_TIMEOUT` overall because the download timeout is applied to headers and each inactive read, not total duration.
 
+### Files uploaded by respondents
+
+Use `download_uploaded_file` for a File Upload question's attachment. Get the response ID and `QIDn_FILE_ID` from exported responses, then call:
+
+```json
+{
+  "surveyId": "SV_...",
+  "responseId": "R_...",
+  "fileId": "F_...",
+  "saveToFile": "submission.pdf"
+}
+```
+
+The tool streams the original bytes to the MCP server machine's Downloads folder and returns `savedToFile` and the byte count. It works in Qualtrics read-only mode and never returns file contents as text. Supply a filename with the original extension; a name without an extension gets `.bin`. Paths and overwriting existing files are rejected, and interrupted downloads remove their partial file.
+
+`qualtrics_api_request` rejects binary responses with a clear error instead of decoding and corrupting them. This also protects files with missing or misleading content types on the uploaded-files endpoint. Previously corrupted downloads must be downloaded again; UTF-8 replacement characters cannot recover the original bytes.
+
 ### Advanced JSON API access
 
 Use `qualtrics_api_request` when an authorized Qualtrics API v3 JSON endpoint lacks a dedicated tool. The request remains pinned to the configured Qualtrics origin:
@@ -85,7 +102,7 @@ Use `qualtrics_api_request` when an authorized Qualtrics API v3 JSON endpoint la
 - Known routes still require their normal least-privilege scope; only otherwise-unmapped writes use the high-risk `advanced` scope.
 - The path cannot contain another origin, query text, fragments, backslashes, traversal, whitespace, duplicate/trailing slashes, or percent-encoded segments. Query parameters are encoded separately.
 
-Prefer dedicated tools where available because they validate payloads, preserve full-replacement resources, and add safety checks. The escape hatch is intentionally JSON-focused; use the dedicated survey-import tools for multipart uploads and response-export tools for downloads.
+Prefer dedicated tools where available because they validate payloads, preserve full-replacement resources, and add safety checks. The escape hatch is intentionally JSON-focused; use the dedicated survey-import tools for multipart uploads, response-export tools for exports, and `download_uploaded_file` for respondent uploads.
 
 ## Safety and write scopes
 
@@ -194,7 +211,7 @@ The MCP protocol uses stdout, so diagnostics must go to stderr. The implementati
 
 ## Coverage boundaries
 
-Qualtrics exposes additional product-specific, licensed, private, UI-only, and binary APIs. This project does not provide a dedicated semantic tool for every XM product endpoint. Authorized JSON API v3 endpoints can generally be reached through `qualtrics_api_request`; multipart survey imports and response exports have dedicated paths. Endpoint availability and accepted payloads still depend on the account's license, brand configuration, and API permissions.
+Qualtrics exposes additional product-specific, licensed, private, UI-only, and binary APIs. This project does not provide a dedicated semantic tool for every XM product endpoint. Authorized JSON API v3 endpoints can generally be reached through `qualtrics_api_request`; multipart survey imports, response exports, and uploaded-file downloads have dedicated paths. Endpoint availability and accepted payloads still depend on the account's license, brand configuration, and API permissions.
 
 Some survey features have no individual public mutation endpoint. Copying or importing a known-good survey is the reliable way to preserve features such as scoring or specialized presentation settings; `get_question_template` provides the analogous pattern for specialized question types.
 

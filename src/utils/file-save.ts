@@ -24,7 +24,7 @@ function safeGeneratedPart(value: string): string {
 }
 
 function exportExtension(format: string): string {
-  return format === "json" ? "json" : "csv";
+  return format === "bin" ? "bin" : format === "json" ? "json" : "csv";
 }
 
 function exportFilePath(
@@ -198,4 +198,15 @@ export async function saveExportToFile(
     fileSizeMB: consumed.fileSizeMB,
     wasAutoSaved: consumed.wasAutoSaved,
   };
+}
+
+/** Always save uploaded file bytes; never inline or UTF-8 decode their data. */
+export async function saveBinaryDownload(
+  chunks: AsyncIterable<Uint8Array>,
+  saveToFile: string
+): Promise<ConsumedExport> {
+  if (!saveToFile.trim()) {
+    throw new Error("saveToFile must be a non-empty filename");
+  }
+  return consumeExportDownload(chunks, "", "bin", saveToFile, undefined, true);
 }

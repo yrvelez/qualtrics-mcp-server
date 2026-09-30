@@ -1,6 +1,6 @@
 # Qualtrics MCP Server
 
-An MCP server providing 112 tools: 110 Qualtrics actions across 14 API areas plus 2 server controls. It is a comprehensive survey-programming surface with a guarded JSON API v3 escape hatch; do not describe it as a dedicated wrapper for every licensed Qualtrics enterprise endpoint.
+An MCP server providing 113 tools: 111 Qualtrics actions across 14 API areas plus 2 server controls. It is a comprehensive survey-programming surface with a guarded JSON API v3 escape hatch; do not describe it as a dedicated wrapper for every licensed Qualtrics enterprise endpoint.
 
 ## Example Reference
 
@@ -33,8 +33,8 @@ See `examples/motivated-reasoning-study.ts` for a complete MCP-only example of b
 
 - The server starts read-only unless `QUALTRICS_READ_ONLY=false`. Prefer `set_write_scopes` and grant only the required scopes.
 - Use dedicated tools when available. `qualtrics_api_request` is the guarded fallback for authorized JSON API v3 endpoints; known routes keep their normal scope, and otherwise-unmapped writes require `advanced`.
-- Use dedicated import tools for multipart QSF/TXT/DOCX content and response tools for export downloads.
-- Run `validate_survey_design` before versioning or activation. See `docs/API_COVERAGE.md` for the exact 112-tool inventory and limitations.
+- Use dedicated import tools for multipart QSF/TXT/DOCX content and response tools for export downloads and byte-preserving uploaded-file downloads.
+- Run `validate_survey_design` before versioning or activation. See `docs/API_COVERAGE.md` for the exact 113-tool inventory and limitations.
 
 ## Secrets
 
