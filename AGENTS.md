@@ -31,7 +31,7 @@ See `examples/motivated-reasoning-study.ts` for a complete MCP-only example of b
 
 ## Safety and Coverage
 
-- The server starts read-only unless `QUALTRICS_READ_ONLY=false`. Prefer `set_write_scopes` and grant only the required scopes.
+- The server starts read-only unless `QUALTRICS_READ_ONLY=false`. Prefer `set_write_scopes` and grant only the required scopes. `QUALTRICS_WRITE_SCOPES` presets startup scopes; with `QUALTRICS_WRITE_SCOPES_LOCKED=true` they are a ceiling that `set_write_scopes` cannot exceed.
 - Use dedicated tools when available. `qualtrics_api_request` is the guarded fallback for authorized JSON API v3 endpoints; known routes keep their normal scope, and otherwise-unmapped writes require `advanced`.
 - Use dedicated import tools for multipart QSF/TXT/DOCX content and response tools for export downloads.
 - Run `validate_survey_design` before versioning or activation. See `docs/API_COVERAGE.md` for the exact 112-tool inventory and limitations.

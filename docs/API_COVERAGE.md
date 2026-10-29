@@ -207,7 +207,7 @@ Most reads are allowed in the default read-only mode, including response-export 
 | `users` | High | User resources |
 | `advanced` | High | Otherwise-unmapped JSON API writes |
 
-At startup, `QUALTRICS_READ_ONLY` defaults to `true`, leaving the enabled-scope set empty. `set_write_scopes` is the preferred way to grant only what a task needs. `set_read_only_mode` is a compatibility convenience; disabling read-only mode grants all scopes.
+At startup, `QUALTRICS_READ_ONLY` defaults to `true`, leaving the enabled-scope set empty. `set_write_scopes` is the preferred way to grant only what a task needs. `set_read_only_mode` is a compatibility convenience; disabling read-only mode grants all scopes. `QUALTRICS_WRITE_SCOPES` presets the startup scopes, and `QUALTRICS_WRITE_SCOPES_LOCKED=true` makes that list a ceiling: `set_write_scopes` and `set_read_only_mode` refuse anything outside it, and the client itself rejects out-of-ceiling assignments.
 
 ## Questionnaire-programming guarantees
 
