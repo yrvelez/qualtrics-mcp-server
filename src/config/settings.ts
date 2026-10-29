@@ -1,5 +1,16 @@
 import { z } from "zod";
 
+export const WRITE_SCOPE_NAMES = [
+  "users",
+  "contacts",
+  "surveys",
+  "surveyDesign",
+  "questionsAndBlocks",
+  "distributions",
+  "libraries",
+  "advanced",
+] as const;
+
 const ConfigSchema = z.object({
   qualtrics: z.object({
     apiToken: z.string().min(1),
@@ -8,6 +19,8 @@ const ConfigSchema = z.object({
   }),
   server: z.object({
     readOnly: z.boolean().default(true),
+    writeScopes: z.array(z.enum(WRITE_SCOPE_NAMES)).optional(),
+    writeScopesLocked: z.boolean().optional(),
     rateLimiting: z.object({
       enabled: z.boolean().default(true),
       requestsPerMinute: z.number().int().positive().default(50),
@@ -29,6 +42,25 @@ const ENV_HELP: Record<string, { env: string; help: string }> = {
   },
 };
 
+function parseWriteScopes(raw: string | undefined): (typeof WRITE_SCOPE_NAMES)[number][] | undefined {
+  const names = (raw ?? "").split(",").map((name) => name.trim()).filter(Boolean);
+  if (names.length === 0) return undefined;
+  const scopes = new Set<(typeof WRITE_SCOPE_NAMES)[number]>();
+  const unknown: string[] = [];
+  for (const name of names) {
+    const scope = WRITE_SCOPE_NAMES.find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+    if (scope) scopes.add(scope);
+    else unknown.push(name);
+  }
+  if (unknown.length > 0) {
+    throw new Error(
+      `QUALTRICS_WRITE_SCOPES contains unknown scope(s): ${unknown.join(", ")}. ` +
+        `Valid scopes: ${WRITE_SCOPE_NAMES.join(", ")}`
+    );
+  }
+  return [...scopes];
+}
+
 export async function loadConfig(): Promise<QualtricsConfig> {
   const config = {
     qualtrics: {
@@ -38,6 +70,8 @@ export async function loadConfig(): Promise<QualtricsConfig> {
     },
     server: {
       readOnly: process.env.QUALTRICS_READ_ONLY !== "false",
+      writeScopes: parseWriteScopes(process.env.QUALTRICS_WRITE_SCOPES),
+      writeScopesLocked: process.env.QUALTRICS_WRITE_SCOPES_LOCKED === "true",
       rateLimiting: {
         enabled: process.env.RATE_LIMITING_ENABLED !== "false",
         requestsPerMinute: parseInt(process.env.RATE_LIMIT_RPM || "50"),

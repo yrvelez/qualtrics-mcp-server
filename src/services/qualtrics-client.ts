@@ -1,4 +1,4 @@
-import { QualtricsConfig } from "../config/settings.js";
+import { type QualtricsConfig, WRITE_SCOPE_NAMES } from "../config/settings.js";
 import { RateLimiter } from "./rate-limiter.js";
 import type { Survey, SurveyListResponse, ResponseExportJob } from "../types/index.js";
 
@@ -21,26 +21,9 @@ export type { Survey, SurveyListResponse, ResponseExportJob };
  * MINIMAL RISK:
  *   "distributions" — distributions and links
  */
-export type WriteScope =
-  | "users"
-  | "contacts"
-  | "surveys"
-  | "surveyDesign"
-  | "questionsAndBlocks"
-  | "distributions"
-  | "libraries"
-  | "advanced";
+export type WriteScope = (typeof WRITE_SCOPE_NAMES)[number];
 
-export const ALL_WRITE_SCOPES: WriteScope[] = [
-  "users",
-  "contacts",
-  "surveys",
-  "surveyDesign",
-  "questionsAndBlocks",
-  "distributions",
-  "libraries",
-  "advanced",
-];
+export const ALL_WRITE_SCOPES: WriteScope[] = [...WRITE_SCOPE_NAMES];
 
 export type RiskLevel = "HIGH" | "MEDIUM" | "LOW" | "MINIMAL";
 
@@ -145,24 +128,47 @@ export class QualtricsClient {
   private rateLimiter: RateLimiter;
   private timeout: number;
 
+  private _writeScopes: Set<WriteScope>;
+
+  /** When set, the most scopes this client can ever enable (QUALTRICS_WRITE_SCOPES_LOCKED). */
+  private readonly scopeCeiling: ReadonlySet<WriteScope> | null;
+
   /**
    * Set of scopes that are allowed to perform write operations.
    * Empty set = fully read-only. All scopes present = fully read-write.
+   * Assigning a scope outside the ceiling throws.
    */
-  public writeScopes: Set<WriteScope>;
+  public get writeScopes(): Set<WriteScope> {
+    return this._writeScopes;
+  }
+
+  public set writeScopes(scopes: Set<WriteScope>) {
+    const denied = [...scopes].filter((scope) => !this.isScopeAllowed(scope));
+    if (denied.length > 0) {
+      throw new Error(`Write scope(s) not permitted by server configuration: ${denied.join(", ")}`);
+    }
+    this._writeScopes = new Set(scopes);
+  }
+
+  public isScopeAllowed(scope: WriteScope): boolean {
+    return this.scopeCeiling === null || this.scopeCeiling.has(scope);
+  }
+
+  /** The locked list of scopes, or null when clients may enable any scope. */
+  public get lockedScopes(): WriteScope[] | null {
+    return this.scopeCeiling ? ALL_WRITE_SCOPES.filter((s) => this.scopeCeiling!.has(s)) : null;
+  }
 
   /** Backwards-compatible getter. */
   public get readOnly(): boolean {
-    return this.writeScopes.size === 0;
+    return this._writeScopes.size === 0;
   }
 
-  /** Backwards-compatible setter: true clears all scopes, false grants all. */
+  /** Backwards-compatible setter: true clears all scopes, false grants every permitted scope. */
   public set readOnly(value: boolean) {
-    if (value) {
-      this.writeScopes.clear();
-    } else {
-      this.writeScopes = new Set(ALL_WRITE_SCOPES);
-    }
+    this._writeScopes = value
+      ? new Set()
+      : new Set(ALL_WRITE_SCOPES.filter((scope) => this.isScopeAllowed(scope)));
   }
 
   /** Endpoints that use POST but are actually read operations. */
@@ -182,7 +188,10 @@ export class QualtricsClient {
     this.apiToken = config.qualtrics.apiToken;
     this.rateLimiter = new RateLimiter(config.server.rateLimiting);
     this.timeout = config.server.timeout;
-    this.writeScopes = config.server.readOnly ? new Set() : new Set(ALL_WRITE_SCOPES);
+    const initial: WriteScope[] =
+      config.server.writeScopes ?? (config.server.readOnly ? [] : ALL_WRITE_SCOPES);
+    this.scopeCeiling = config.server.writeScopesLocked ? new Set(initial) : null;
+    this._writeScopes = new Set(initial);
   }
 
   public async makeRequest<T>(

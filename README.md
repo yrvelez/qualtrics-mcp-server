@@ -104,6 +104,15 @@ Use `set_write_scopes` to enable only the categories required for a task:
 | `users` | High | User-account changes |
 | `advanced` | High | Otherwise-unmapped API writes; impact depends on the endpoint |
 
+### Presetting and locking scopes
+
+By default a client (or agent) chooses its own scopes by calling `set_write_scopes`, and nothing on the server stops it from choosing a high-risk one. Two settings let the server owner decide instead:
+
+- `QUALTRICS_WRITE_SCOPES` is a comma-separated list, such as `questionsAndBlocks,surveyDesign`. Every new session starts with exactly those scopes enabled, so agents can write without asking. Names are not case-sensitive; an unknown name stops the server at startup. When set, it takes precedence over `QUALTRICS_READ_ONLY`.
+- `QUALTRICS_WRITE_SCOPES_LOCKED=true` turns the list into a ceiling. `set_write_scopes` and `set_read_only_mode` then refuse any scope outside it (the agent is told why and nothing changes), and sessions can still narrow within the list, including back to read-only. With the lock set and no list, the server is permanently read-only. The agent's instructions describe the limits, so it does not waste calls on scopes it cannot have.
+
+Without the lock the list is only a starting point, and a client can still enable other scopes.
+
 `set_read_only_mode` remains as a convenience switch. Setting it to `false` enables every scope; scoped permission grants are safer for normal use. Delete tools also require explicit confirmation where appropriate.
 
 ## Setup
@@ -129,6 +138,8 @@ pnpm start
 | `QUALTRICS_DATA_CENTER` | Yes | - | Data-center ID such as `yul1` or `iad1` |
 | `QUALTRICS_BASE_URL` | No | `https://<data-center>.qualtrics.com/API/v3` | API v3 base URL override |
 | `QUALTRICS_READ_ONLY` | No | `true` | Use `false` to enable all write scopes at startup |
+| `QUALTRICS_WRITE_SCOPES` | No | - | Comma-separated scopes enabled at startup in every session, such as `questionsAndBlocks,surveyDesign`. Overrides `QUALTRICS_READ_ONLY` |
+| `QUALTRICS_WRITE_SCOPES_LOCKED` | No | `false` | Use `true` to make `QUALTRICS_WRITE_SCOPES` a ceiling that clients cannot raise. With no list, the server stays read-only |
 | `RATE_LIMITING_ENABLED` | No | `true` | Enable the client-side request limiter |
 | `RATE_LIMIT_RPM` | No | `50` | Requests per minute |
 | `REQUEST_TIMEOUT` | No | `30000` | Ordinary request timeout and response-download header/chunk inactivity timeout, in milliseconds |
